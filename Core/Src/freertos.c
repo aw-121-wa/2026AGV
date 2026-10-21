@@ -26,7 +26,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
 #include "hwt101.h"
+#include "zdt_x42s.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -59,7 +61,7 @@ const osThreadAttr_t StartTask_attributes = {
 osThreadId_t IMUTaskHandle;
 const osThreadAttr_t IMUTask_attributes = {
   .name = "IMUTask",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for ChassisTask */
@@ -158,7 +160,7 @@ void StartIMUTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    HWT101_ProcessData(&huart1, &imu);
+    HWT101_ProcessData(&huart5, &imu);
     osDelay(1);
   }
   /* USER CODE END StartIMUTask */
@@ -174,9 +176,39 @@ void StartIMUTask(void *argument)
 void StartChassisTask(void *argument)
 {
   /* USER CODE BEGIN StartChassisTask */
+  /* 示例：注册四台轮电机并上电使能，转速先保持 0，只验证通信与反馈解析。
+     四台都能读出位置和状态后，再把 ZDT_SetSpeed / ZDT_Move 接进控制环。 */
+  zdt_motor *wheel[4];
+  wheel[0] = ZDT_AddMotor(ZDT_ADDR_LF);
+  wheel[1] = ZDT_AddMotor(ZDT_ADDR_RF);
+  wheel[2] = ZDT_AddMotor(ZDT_ADDR_LR);
+  wheel[3] = ZDT_AddMotor(ZDT_ADDR_RR);
+
+  for (uint8_t i = 0; i < 4U; ++i)
+  {
+    if (wheel[i] != NULL)
+    {
+      (void)ZDT_EnableMotor(wheel[i], 1U);
+    }
+  }
+
+  uint32_t feedback_tick = 0;
   /* Infinite loop */
   for(;;)
   {
+    ZDT_ProcessData(); // 中断只入队，解析统一放在本任务
+
+    if (++feedback_tick >= 20U) // 约 20 ms 一轮反馈
+    {
+      feedback_tick = 0U;
+      for (uint8_t i = 0; i < 4U; ++i)
+      {
+        if (wheel[i] != NULL)
+        {
+          (void)ZDT_RequestFeedback(wheel[i]);
+        }
+      }
+    }
     osDelay(1);
   }
   /* USER CODE END StartChassisTask */

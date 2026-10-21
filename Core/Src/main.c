@@ -28,6 +28,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "hwt101.h"
+#include "zdt_x42s.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -98,10 +99,14 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_FDCAN2_Init();
-  MX_USART2_UART_Init();
-  MX_USART1_UART_Init();
+  MX_USART6_UART_Init();
+  MX_UART5_UART_Init();
   /* USER CODE BEGIN 2 */
-  if (HWT101_Init(&huart1) != HAL_OK)
+  if (HWT101_Init(&huart5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (ZDT_Init(&hfdcan2) != HAL_OK)
   {
     Error_Handler();
   }
