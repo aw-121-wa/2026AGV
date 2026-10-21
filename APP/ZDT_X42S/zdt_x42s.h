@@ -8,9 +8,9 @@
 /* 驱动器细分，位置指令按 200 * 细分 折算成一圈。 */
 #define ZDT_MICROSTEPS 16U
 /* 允许下发的最高转速，单位：RPM。超限会被驱动器判为参数错误。 */
-#define ZDT_MAX_RPM 3000U
+#define ZDT_MAX_RPM 6000U
 /* 速度模式默认加速度档位，0 表示不加速直接全速。 */
-#define ZDT_DEFAULT_ACC 200U
+#define ZDT_DEFAULT_ACC 2000U
 /* 反馈位置换算：X 固件为 0.1 度/LSB；若换成 Emm 固件改为 360.0f / 65536.0f。 */
 #define ZDT_POS_LSB_DEG 0.1f
 
