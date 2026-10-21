@@ -32,6 +32,12 @@ typedef struct {
     uint8_t ack_pending;    // 1 表示已下发命令、尚未收到应答
     float position_deg;     // 实时位置，单位：度，符号已还原
     float speed_rpm;        // 实时转速，单位：RPM，符号已还原
+    uint32_t position_ms;
+    uint32_t status_ms;
+    uint32_t speed_ms;
+    uint8_t speed_valid;
+    uint32_t position_seq;
+    uint8_t status_valid;
     uint32_t rx_frames;     // 校验通过的帧数
     uint32_t rx_errors;     // 校验失败或字段长度不符的帧数
 } zdt_motor;

@@ -230,6 +230,13 @@ SECTIONS
   PROVIDE( __bss_start = __tbss_start );
   PROVIDE( __bss_size = __bss_end - __bss_start );
 
+  /* DMA1 cannot access DTCM. HWT101 configures this aligned region non-cacheable. */
+  .imu_dma (NOLOAD) : ALIGN(256)
+  {
+    *(.imu_dma)
+    . = ALIGN(256);
+  } >RAM_D2
+
   /* User_heap_stack section, used to check that there is enough RAM left */
   ._user_heap_stack (NOLOAD) :
   {

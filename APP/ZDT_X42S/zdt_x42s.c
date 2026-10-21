@@ -391,6 +391,9 @@ static void ZDT_HandleFrame(const zdt_frame *frame)
             uint32_t raw = ((uint32_t)data[2] << 24) | ((uint32_t)data[3] << 16) |
                            ((uint32_t)data[4] << 8) | (uint32_t)data[5];
             motor->position_deg = ZDT_Signed(data[1], (float)raw * ZDT_POS_LSB_DEG);
+            motor->position_ms = HAL_GetTick();
+            ++motor->position_seq;
+            if (motor->position_seq == 0U) ++motor->position_seq;
         }
         return;
 
@@ -403,6 +406,8 @@ static void ZDT_HandleFrame(const zdt_frame *frame)
         {
             uint16_t raw = (uint16_t)(((uint16_t)data[2] << 8) | data[3]);
             motor->speed_rpm = ZDT_Signed(data[1], (float)raw);
+            motor->speed_ms = HAL_GetTick();
+            motor->speed_valid = 1U;
         }
         return;
 
@@ -416,6 +421,8 @@ static void ZDT_HandleFrame(const zdt_frame *frame)
         motor->in_position = ((data[1] & ZDT_STATUS_IN_POS) != 0U) ? 1U : 0U;
         motor->stalled = ((data[1] & ZDT_STATUS_STALLED) != 0U) ? 1U : 0U;
         motor->protected_flag = ((data[1] & ZDT_STATUS_PROTECT) != 0U) ? 1U : 0U;
+        motor->status_ms = HAL_GetTick();
+        motor->status_valid = 1U;
         return;
 
     case ZDT_CODE_ERROR: // 00 <EE> 6B，命令格式错误

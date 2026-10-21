@@ -46,7 +46,10 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     APP/HWT101/hwt101.c
+    APP/uart_callbacks.c
     APP/ZDT_X42S/zdt_x42s.c
+    APP/Chassis_motor/chassis.c
+    APP/Chassis_motor/chassis_cmd.c
 )
 
 # Add include paths
@@ -54,6 +57,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
     APP/HWT101
     APP/ZDT_X42S
+    APP/Chassis_motor
 )
 
 # Add project symbols (macros)

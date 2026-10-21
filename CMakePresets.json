@@ -23,6 +23,15 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
+        },
+        {
+            "name": "Size",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "MinSizeRel",
+                "CMAKE_C_FLAGS_MINSIZEREL": "-Os -g",
+                "CMAKE_ASM_FLAGS_MINSIZEREL": "-Os -g"
+            }
         }
     ],
     "buildPresets": [
@@ -33,6 +42,10 @@
         {
             "name": "Release",
             "configurePreset": "Release"
+        },
+        {
+            "name": "Size",
+            "configurePreset": "Size"
         }
     ]
 }

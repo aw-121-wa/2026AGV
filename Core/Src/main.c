@@ -29,6 +29,8 @@
 /* USER CODE BEGIN Includes */
 #include "hwt101.h"
 #include "zdt_x42s.h"
+#include "chassis.h"
+#include "chassis_cmd.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -106,7 +108,11 @@ int main(void)
   {
     Error_Handler();
   }
-  if (ZDT_Init(&hfdcan2) != HAL_OK)
+  if (Chassis_Init(&hfdcan2) != HAL_OK)   // 内部已含 ZDT_Init 与四轴注册
+  {
+    Error_Handler();
+  }
+  if (ChassisCmd_Init(&huart6) != HAL_OK) // USART6 接收定距移动命令
   {
     Error_Handler();
   }
