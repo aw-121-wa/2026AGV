@@ -238,6 +238,13 @@ SECTIONS
   } >RAM_D2
 
   /* User_heap_stack section, used to check that there is enough RAM left */
+  /* Planner buffers: explicitly initialized by Map_Init/AStar_Begin. */
+  .agv_ram (NOLOAD) : ALIGN(4)
+  {
+    *(.agv_ram)
+    . = ALIGN(4);
+  } >RAM
+
   ._user_heap_stack (NOLOAD) :
   {
     . = ALIGN(8);

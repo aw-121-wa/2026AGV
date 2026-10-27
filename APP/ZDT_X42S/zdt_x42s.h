@@ -8,7 +8,7 @@
 /* 驱动器细分，位置指令按 200 * 细分 折算成一圈。 */
 #define ZDT_MICROSTEPS 16U
 /* 允许下发的最高转速，单位：RPM。超限会被驱动器判为参数错误。 */
-#define ZDT_MAX_RPM 6000U
+#define ZDT_MAX_RPM 3000U
 /* 速度模式默认加速度档位，0 表示不加速直接全速。 */
 #define ZDT_DEFAULT_ACC 2000U
 /* 反馈位置换算：X 固件为 0.1 度/LSB；若换成 Emm 固件改为 360.0f / 65536.0f。 */
@@ -50,7 +50,7 @@ zdt_motor *ZDT_AddMotor(uint8_t address);
 zdt_motor *ZDT_FindMotor(uint8_t address);
 // 使能/失能，enable 非 0 即使能；失能后电机松轴。
 HAL_StatusTypeDef ZDT_EnableMotor(zdt_motor *motor, uint8_t enable);
-// 速度模式：rpm 为负有符号转速，acc 为 0-255 加速度档位。
+// X 固件速度模式：rpm 为有符号转速，acc 为 RPM/s（此接口范围 0-255，0 直接启动）。
 HAL_StatusTypeDef ZDT_SetSpeed(zdt_motor *motor, int16_t rpm, uint8_t acc);
 // 位置模式：counts 为负有符号脉冲数，absolute 非 0 表示绝对位置。
 HAL_StatusTypeDef ZDT_Move(zdt_motor *motor, int32_t counts, uint16_t rpm, uint8_t acc, uint8_t absolute);

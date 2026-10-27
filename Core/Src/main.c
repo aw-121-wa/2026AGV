@@ -31,6 +31,8 @@
 #include "zdt_x42s.h"
 #include "chassis.h"
 #include "chassis_cmd.h"
+#include "agv_config.h"
+#include "agv_run.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,7 +53,11 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+/* 时钟自检。烧录后用调试器读这两个符号：
+   g_hse_ok   = 1 表示用的确实是 8 MHz 晶振；= 0 表示晶振没起振、已退回内部 HSI。
+   g_sysclk_hz 应该等于 480000000。 */
+volatile uint8_t  g_hse_ok = 0;
+volatile uint32_t g_sysclk_hz = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -94,7 +100,11 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /* 能执行到这里说明时钟已经配好了，回读硬件状态记录本次启动用的是哪个源：
+     HSERDY=1 → 外部 8 MHz 晶振；=0 → 晶振没起来（此时固件其实已经死在
+     SystemClock_Config 的 Error_Handler 里，读到的会一直是初值 0）。 */
+  g_hse_ok    = ((RCC->CR & RCC_CR_HSERDY) != 0U) ? 1U : 0U;
+  g_sysclk_hz = SystemCoreClock;
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -102,7 +112,7 @@ int main(void)
   MX_DMA_Init();
   MX_FDCAN2_Init();
   MX_USART6_UART_Init();
-  MX_UART5_UART_Init();
+  MX_UART5_Init();
   /* USER CODE BEGIN 2 */
   if (HWT101_Init(&huart5) != HAL_OK)
   {
@@ -112,6 +122,7 @@ int main(void)
   {
     Error_Handler();
   }
+  Agv_Init(AGV_MODE, AGV_START_ZONE);
   if (ChassisCmd_Init(&huart6) != HAL_OK) // USART6 接收定距移动命令
   {
     Error_Handler();
@@ -160,17 +171,16 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 60;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 2;
+  RCC_OscInitStruct.PLL.PLLN = 240;
   RCC_OscInitStruct.PLL.PLLP = 2;
   RCC_OscInitStruct.PLL.PLLQ = 8;
   RCC_OscInitStruct.PLL.PLLR = 2;
-  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_2;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
   RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)

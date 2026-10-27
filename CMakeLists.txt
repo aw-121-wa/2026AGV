@@ -50,6 +50,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     APP/ZDT_X42S/zdt_x42s.c
     APP/Chassis_motor/chassis.c
     APP/Chassis_motor/chassis_cmd.c
+    APP/Chassis_motor/chassis_telemetry.c
+    Astar/map.c
+    Astar/astar.c
+    Astar/survey.c
+    Astar/agv_run.c
 )
 
 # Add include paths
@@ -58,12 +63,21 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     APP/HWT101
     APP/ZDT_X42S
     APP/Chassis_motor
+    Astar
 )
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
 )
+
+# Optional build-directory overrides; otherwise edit Astar/agv_config.h.
+if(DEFINED AGV_MODE)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE AGV_MODE=${AGV_MODE})
+endif()
+if(DEFINED AGV_START_ZONE)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE AGV_START_ZONE=${AGV_START_ZONE})
+endif()
 
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)

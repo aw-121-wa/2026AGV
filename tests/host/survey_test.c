@@ -1,0 +1,17 @@
+#include <assert.h>
+#include <stdio.h>
+#include "survey.h"
+int main(void) {
+ for(unsigned zone=1;zone<=2;++zone) {
+  Survey_Init(zone);
+  unsigned edges=0;
+  for(unsigned i=0;i<Survey_Count();++i) {
+   MapPoint a,b; unsigned edge;
+   assert(Survey_Leg(i,&a,&b,&edge));
+   assert((a.x==b.x)!=(a.y==b.y));
+   edges |= 1U<<edge;
+  }
+  assert(edges==0xfff && Survey_Count()==24);
+ }
+ puts("survey coverage OK");
+}

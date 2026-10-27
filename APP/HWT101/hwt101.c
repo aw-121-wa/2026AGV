@@ -20,6 +20,7 @@ static uint8_t frame_index;
 static volatile uint8_t rx_gap;     // 队列溢出，需要重新同步帧头
 static volatile uint8_t restart_rx; // 接收异常，需要在任务中重启 DMA
 
+/* 把 DMA 缓冲区所在页配成 MPU region1：普通内存、非缓存、可共享，防止 D-Cache 读到旧数据。 */
 static void HWT101_DmaMemoryInit(void)
 {
     __HAL_RCC_D2SRAM1_CLK_ENABLE();
@@ -52,6 +53,7 @@ static HAL_StatusTypeDef HWT101_StartRx(void)
     return status;
 }
 
+/* 初始化陀螺仪接收：校验句柄与 DMA 循环模式、配置 MPU、启动循环接收；单实例，重复调用返回 BUSY。 */
 HAL_StatusTypeDef HWT101_Init(UART_HandleTypeDef *huart)
 {
     if (huart == NULL || huart->hdmarx == NULL || huart->hdmarx->Init.Mode != DMA_CIRCULAR)
@@ -74,6 +76,7 @@ HAL_StatusTypeDef HWT101_Init(UART_HandleTypeDef *huart)
     return status;
 }
 
+/* 从软件环形队列取一个字节和它的接收时间戳；队列空返回 0。 */
 static uint8_t HWT101_ReadByte(uint8_t *byte, uint32_t *received_ms)
 {
     if (rx_head == rx_tail)
@@ -88,6 +91,7 @@ static uint8_t HWT101_ReadByte(uint8_t *byte, uint32_t *received_ms)
     return 1;
 }
 
+/* 空闲/半满中断里执行：按 DMA 计数器算出新增字节，搬进 rx_buf 并打时间戳，空间不足则置溢出标志。 */
 void HWT101_RxEvent(UART_HandleTypeDef *huart, uint16_t size)
 {
     (void)size;
@@ -121,6 +125,7 @@ void HWT101_RxEvent(UART_HandleTypeDef *huart, uint16_t size)
     rx_head = head;
 }
 
+/* 串口错误中断：只标记需要重启并作废数据，重启动作留给任务。 */
 void HWT101_RxError(UART_HandleTypeDef *huart)
 {
     if (imu_uart != NULL && huart == imu_uart)
@@ -162,6 +167,7 @@ static void HWT101_ParseByte(uint8_t byte, uint32_t received_ms, imu_data *data)
     __set_PRIMASK(irq);
 }
 
+/* 任务侧主入口：先处理错误重启与队列溢出，再逐字节出队组帧，最多消费一圈。 */
 void HWT101_ProcessData(UART_HandleTypeDef *huart, imu_data *data)
 {
     if (!imu_uart || huart != imu_uart || !data) return;

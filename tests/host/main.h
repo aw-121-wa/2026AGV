@@ -5,7 +5,7 @@
 typedef enum { HAL_OK, HAL_ERROR, HAL_BUSY, HAL_TIMEOUT } HAL_StatusTypeDef;
 typedef struct { int dummy; } FDCAN_HandleTypeDef;
 typedef struct { struct { uint32_t Mode; } Init; uint32_t remaining; } DMA_HandleTypeDef;
-typedef struct { uint32_t RxState; DMA_HandleTypeDef *hdmarx; } UART_HandleTypeDef;
+typedef struct { uint32_t RxState; DMA_HandleTypeDef *hdmarx; uint32_t gState; } UART_HandleTypeDef;
 typedef struct {
     uint32_t Enable, Number, BaseAddress, Size, TypeExtField, AccessPermission;
     uint32_t DisableExec, IsShareable, IsCacheable, IsBufferable;
@@ -44,6 +44,7 @@ static inline void __set_PRIMASK(uint32_t x) { (void)x; }
 static inline void __disable_irq(void) {}
 static inline void __DMB(void) {}
 uint32_t HAL_GetTick(void);
+HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *, uint8_t *, uint16_t);
 HAL_StatusTypeDef HAL_UARTEx_ReceiveToIdle_IT(UART_HandleTypeDef *, uint8_t *, uint16_t);
 uint32_t HAL_UARTEx_GetRxEventType(UART_HandleTypeDef *);
 #endif

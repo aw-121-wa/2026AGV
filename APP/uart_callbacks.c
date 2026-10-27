@@ -8,6 +8,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
     ChassisCmd_RxEvent(huart, size);
 }
 
+/* 串口错误中断统一入口，目前只通知陀螺仪驱动标注重启。 */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     HWT101_RxError(huart);

@@ -29,7 +29,7 @@ UART_HandleTypeDef huart6;
 DMA_HandleTypeDef hdma_uart5_rx;
 
 /* UART5 init function */
-void MX_UART5_UART_Init(void)
+void MX_UART5_Init(void)
 {
 
   /* USER CODE BEGIN UART5_Init 0 */
@@ -277,3 +277,4 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
+

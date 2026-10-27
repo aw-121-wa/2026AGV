@@ -46,6 +46,7 @@ static zdt_frame rx_buf[ZDT_RX_SIZE];
 static volatile uint16_t rx_head; // 中断写入位置
 static volatile uint16_t rx_tail; // 任务读取位置
 
+/* 初始化 FDCAN：全部帧进 FIFO0、启动总线、只开新报文中断；单实例，重复调用返回 BUSY。 */
 HAL_StatusTypeDef ZDT_Init(FDCAN_HandleTypeDef *hfdcan)
 {
     if (hfdcan == NULL)
@@ -84,6 +85,7 @@ HAL_StatusTypeDef ZDT_Init(FDCAN_HandleTypeDef *hfdcan)
     return HAL_OK;
 }
 
+/* 按驱动器地址在注册表里查电机，找不到返回 NULL。 */
 zdt_motor *ZDT_FindMotor(uint8_t address)
 {
     for (uint8_t i = 0; i < motor_count; ++i)
@@ -96,6 +98,7 @@ zdt_motor *ZDT_FindMotor(uint8_t address)
     return NULL;
 }
 
+/* 把电机地址注册进静态表并返回句柄；广播地址 0、重复地址、表满都返回 NULL。 */
 zdt_motor *ZDT_AddMotor(uint8_t address)
 {
     if (address == 0U)
@@ -184,6 +187,7 @@ static HAL_StatusTypeDef ZDT_SendCommand(uint8_t address, uint8_t code, const ui
     return ZDT_Transmit(address, payload, (uint8_t)(args_length + 2U));
 }
 
+/* 下发 0xF3 使能/失能命令（辅助码 + 状态 + 同步标志）。 */
 HAL_StatusTypeDef ZDT_EnableMotor(zdt_motor *motor, uint8_t enable)
 {
     if (motor == NULL)
@@ -201,6 +205,7 @@ HAL_StatusTypeDef ZDT_EnableMotor(zdt_motor *motor, uint8_t enable)
     return ZDT_SendCommand(motor->address, ZDT_CODE_ENABLE, args, sizeof(args));
 }
 
+/* 下发 0xF6 速度模式：方向与转速绝对值分开编码，超过上限自动限幅。 */
 HAL_StatusTypeDef ZDT_SetSpeed(zdt_motor *motor, int16_t rpm, uint8_t acc)
 {
     if (motor == NULL)
@@ -215,18 +220,22 @@ HAL_StatusTypeDef ZDT_SetSpeed(zdt_motor *motor, int16_t rpm, uint8_t acc)
         magnitude = ZDT_MAX_RPM; // 超限驱动器会回 0xE2，这里先兜住
     }
 
-    // F6 <方向> <速度高> <速度低> <加速度> <同步标志> 6B
-    uint8_t args[5];
+    // X 固件：F6 方向 加速度(2字节，RPM/s) 速度(2字节，0.1RPM) 同步 6B。
+    // 不能使用 Emm 的“速度 + 单字节加速度”格式。
+    uint8_t args[6];
     args[0] = (rpm < 0) ? 0x01U : 0x00U; // 0 正转，1 反转
-    args[1] = (uint8_t)(magnitude >> 8);
-    args[2] = (uint8_t)(magnitude & 0xFFU);
-    args[3] = acc;                       // 0 表示不加速直接全速
-    args[4] = ZDT_SYNC_NOW;
+    args[1] = 0U;
+    args[2] = acc;
+    magnitude = (uint16_t)(magnitude * 10U);
+    args[3] = (uint8_t)(magnitude >> 8);
+    args[4] = (uint8_t)(magnitude & 0xFFU);
+    args[5] = ZDT_SYNC_NOW;
 
     motor->ack_pending = 1U;
     return ZDT_SendCommand(motor->address, ZDT_CODE_SPEED, args, sizeof(args));
 }
 
+/* 下发 0xFD 位置模式：脉冲目标 + 速度 + 加速度，12 字节载荷自动拆成两帧。 */
 HAL_StatusTypeDef ZDT_Move(zdt_motor *motor, int32_t counts, uint16_t rpm, uint8_t acc, uint8_t absolute)
 {
     if (motor == NULL)
@@ -256,6 +265,7 @@ HAL_StatusTypeDef ZDT_Move(zdt_motor *motor, int32_t counts, uint16_t rpm, uint8
     return ZDT_SendCommand(motor->address, ZDT_CODE_MOVE, args, sizeof(args));
 }
 
+/* 下发 0xFE 立即停止命令（辅助码 0x98 + 同步标志）。 */
 HAL_StatusTypeDef ZDT_Stop(zdt_motor *motor)
 {
     if (motor == NULL)
@@ -272,6 +282,7 @@ HAL_StatusTypeDef ZDT_Stop(zdt_motor *motor)
     return ZDT_SendCommand(motor->address, ZDT_CODE_STOP, args, sizeof(args));
 }
 
+/* 连续索取位置、转速、状态三条反馈，供底盘按周期轮询。 */
 HAL_StatusTypeDef ZDT_RequestFeedback(zdt_motor *motor)
 {
     if (motor == NULL)
@@ -291,11 +302,13 @@ HAL_StatusTypeDef ZDT_RequestFeedback(zdt_motor *motor)
     return ZDT_SendCommand(motor->address, ZDT_CODE_STATUS, NULL, 0U);
 }
 
+/* 把经典帧的 DLC 编码换算成字节数，超过 8 按 8 处理。 */
 static uint8_t ZDT_DlcToLength(uint32_t dlc)
 {
     return (dlc <= ZDT_FRAME_SIZE) ? (uint8_t)dlc : (uint8_t)ZDT_FRAME_SIZE;
 }
 
+/* CAN 接收中断：抽空 FIFO0，只保留扩展数据帧，写入软件环形队列。 */
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
     if (zdt_can == NULL || hfdcan != zdt_can)
@@ -342,6 +355,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     }
 }
 
+/* 从接收队列取出一帧，队列空返回 0。 */
 static uint8_t ZDT_PopFrame(zdt_frame *frame)
 {
     if (rx_head == rx_tail)
@@ -354,11 +368,13 @@ static uint8_t ZDT_PopFrame(zdt_frame *frame)
     return 1;
 }
 
+/* 按协议的符号字节给幅值加正负号，0 为正、1 为负。 */
 static float ZDT_Signed(uint8_t sign, float magnitude)
 {
     return (sign == 0U) ? magnitude : -magnitude;
 }
 
+/* 解析一帧：按 ID 找到电机、校验长度与校验码，再按功能码更新位置/转速/状态/应答。 */
 static void ZDT_HandleFrame(const zdt_frame *frame)
 {
     // 地址在 ID 的高字节，包序号在低字节。
@@ -459,6 +475,7 @@ static void ZDT_HandleFrame(const zdt_frame *frame)
     }
 }
 
+/* 任务里调用：把接收队列里的帧全部解析完。 */
 void ZDT_ProcessData(void)
 {
     zdt_frame frame;
@@ -468,11 +485,13 @@ void ZDT_ProcessData(void)
     }
 }
 
+/* 脉冲数换算成角度，200 步 × 细分为一圈。 */
 float ZDT_CountsToDeg(int32_t counts)
 {
     return (float)counts * 360.0f / (200.0f * (float)ZDT_MICROSTEPS);
 }
 
+/* 角度换算成脉冲数，是 ZDT_CountsToDeg 的逆运算。 */
 int32_t ZDT_DegToCounts(float deg)
 {
     return (int32_t)(deg * (200.0f * (float)ZDT_MICROSTEPS) / 360.0f);

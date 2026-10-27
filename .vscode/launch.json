@@ -1,0 +1,27 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "AGV - 连接现有 Debug 服务",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "external",
+            "gdbTarget": "127.0.0.1:3340",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/2026AGV.elf",
+            "gdbPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-gdb.exe"
+        },
+        {
+            "name": "AGV - CMSIS-DAP 独立调试",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "openocd",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/2026AGV.elf",
+            "gdbPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-gdb.exe",
+            "serverpath": "C:/Users/lovec/scoop/shims/openocd.exe",
+            "configFiles": ["interface/cmsis-dap.cfg", "target/stm32h7x.cfg"],
+            "openOCDLaunchCommands": ["adapter speed 1000"]
+        }
+    ]
+}

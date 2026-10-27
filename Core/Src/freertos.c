@@ -21,6 +21,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "main.h"
+#include "FreeRTOS.h"
 #include "cmsis_os2.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -30,6 +31,7 @@
 #include "zdt_x42s.h"
 #include "chassis.h"
 #include "chassis_cmd.h"
+#include "agv_run.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,7 +64,7 @@ const osThreadAttr_t StartTask_attributes = {
 osThreadId_t IMUTaskHandle;
 const osThreadAttr_t IMUTask_attributes = {
   .name = "IMUTask",
-  .stack_size = 256 * 4,
+  .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for ChassisTask */
@@ -182,6 +184,7 @@ void StartChassisTask(void *argument)
   for (;;) {
     Chassis_Update();
     ChassisCmd_Poll();
+    Agv_Tick();
     next_tick += period;
     if ((int32_t)(next_tick - osKernelGetTickCount()) <= 0)
       next_tick = osKernelGetTickCount() + period;

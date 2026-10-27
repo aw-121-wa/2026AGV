@@ -2,6 +2,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#undef assert
+#define assert(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
 #include "main.h"
 #include "hwt101.h"
 #include "zdt_x42s.h"
@@ -14,6 +17,15 @@ static zdt_motor motors[4];
 static int16_t output[4];
 static int fail_send;
 static uint32_t event_type = HAL_UART_RXEVENT_IDLE;
+static char tx_capture[512];
+static const uint8_t *tx_active;
+static uint16_t tx_length;
+HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *u,uint8_t *b,uint16_t n) {
+    if (u->gState) return HAL_BUSY;
+    assert(n < sizeof(tx_capture));
+    memcpy(tx_capture,b,n);tx_capture[n]=0;
+    tx_active=b;tx_length=n;u->gState=1;return HAL_OK;
+}
 uint32_t HAL_GetTick(void) { return ms; }
 HAL_StatusTypeDef ZDT_Init(FDCAN_HandleTypeDef *p) { (void)p; return HAL_OK; }
 zdt_motor *ZDT_AddMotor(uint8_t a) { motors[a-1].address=a; return &motors[a-1]; }
@@ -34,6 +46,7 @@ HAL_StatusTypeDef HAL_UARTEx_ReceiveToIdle_IT(UART_HandleTypeDef *u,uint8_t *b,u
 }
 uint32_t HAL_UARTEx_GetRxEventType(UART_HandleTypeDef *u) { (void)u;return event_type; }
 #include "../../APP/Chassis_motor/chassis.c"
+#include "../../APP/Chassis_motor/chassis_telemetry.c"
 #include "../../APP/Chassis_motor/chassis_cmd.c"
 void HWT101_RxEvent(UART_HandleTypeDef *u, uint16_t n) { (void)u; (void)n; }
 void HWT101_RxError(UART_HandleTypeDef *u) { (void)u; }
@@ -105,6 +118,42 @@ int main(void) {
     assert(Chassis_TurnTo(90)==HAL_BUSY);
     tick(1);assert(chassis.state==CHASSIS_STATE_READY);
     assert(ChassisCmd_Init(&uart)==HAL_OK);
+    command(&uart,"S\n");
+    assert(strstr(tx_capture,"ACK,S,OK") != NULL);
+    /* While HAL owns the IT buffer, polling must not overwrite it. */
+    ms+=100;ChassisCmd_Poll();
+    assert(memcmp(tx_active,tx_capture,tx_length)==0);
+    uart.gState=0;ChassisCmd_Poll();
+    assert(strstr(tx_capture,"$T,") && strstr(tx_capture,"$H,"));
+    uart.gState=0;
+    /* Small turns must not be accepted while still outside 0.1 degree. */
+    assert(Chassis_TurnTo(0.3f)==HAL_OK);
+    complete();
+    assert(fabsf(chassis.yaw-0.3f)<=0.1f);
+    imu.yaw+=0.4f;
+    for(int i=0;i<2000;i++) plant();
+    assert(fabsf(chassis.yaw-0.3f)<=0.1f); // Normal completion maintains heading.
+    Chassis_Stop();
+    imu.yaw+=0.4f;tick(1);
+    assert(chassis.target.wz==0); // Explicit stop cancels holding.
+    command(&uart,"A0.125\n");
+    assert(chassis_cmd_status==HAL_OK);complete();
+    assert(fabsf(chassis.yaw-0.125f)<=0.1f);
+    command(&uart,"A1.2345\n");assert(chassis_cmd_status==HAL_ERROR);
+    /* New IMU data remains visible even when a wheel is stale. */
+    ms+=600;imu.updated_ms=ms;imu.yaw=12.25f;
+    host_clock.CYCCNT+=2400000;Chassis_Update();
+    assert(fabsf(chassis.yaw-12.25f)<0.001f);
+    assert(chassis.state==CHASSIS_STATE_FAULT);
+    tick(1);Chassis_Stop();
+    Chassis_SetVelocity(100,0,0);
+    imu.yaw+=0.15f;
+    for(int i=0;i<200;i++) { Chassis_SetVelocity(100,0,0);tick(1); }
+    assert(chassis.target.wz < -0.3f && chassis.target.wz > -0.6f);
+    Chassis_Stop();
+    chassis_vel combined={1200,1200,240};int16_t limited[4];
+    Chassis_Solve(&combined,limited);
+    for(int i=0;i<4;i++) assert(abs(limited[i])<=400);
     imu.yaw=179;tick(1);
     assert(Chassis_TurnTo(-179)==HAL_OK);tick(1);
     assert(chassis.heading_error>0 && chassis.heading_error<3);
@@ -126,8 +175,9 @@ int main(void) {
     complete();
     assert(fabsf(chassis.pos_x-x-1000)<4);
     assert(fabsf(chassis.pos_y-y)<4);
-    assert(fabsf(chassis.yaw)<1.1f);
-    command(&uart,"A90\n");complete();assert(fabsf(chassis.yaw-90)<1.1f);
+    assert(fabsf(chassis.yaw)<=0.1f);
+    assert(chassis.heading_peak_dynamic>=7.9f && chassis.heading_over_limit>0);
+    command(&uart,"A90\n");complete();assert(fabsf(chassis.yaw-90)<=0.1f);
     x=chassis.pos_x;y=chassis.pos_y;
     command(&uart,"F200\n");complete();
     assert(fabsf(chassis.pos_x-x)<6);assert(fabsf(chassis.pos_y-y-200)<4);
@@ -164,6 +214,13 @@ int main(void) {
     assert(chassis.state==CHASSIS_STATE_FAULT);tick(1);command(&uart,"S\n");
     Chassis_MoveRequest(100,0);tick(1);assert(chassis.mode==CHASSIS_MODE_MOVE);
     command(&uart,"S\n");
+    Chassis_SetMoveSpeedLimit(150);
+    assert(Chassis_MoveDistance(5000,0)==HAL_OK);
+    for(int i=0;i<6100;i++) tick(1);
+    assert(chassis.mode==CHASSIS_MODE_MOVE && chassis.state==CHASSIS_STATE_READY);
+    for(int i=0;i<10000;i++) tick(1);
+    assert(chassis.state==CHASSIS_STATE_FAULT); // Extended timeout still terminates a stuck move.
+    Chassis_Stop();Chassis_SetMoveSpeedLimit(400);
     uint32_t before=Chassis_Micros();
     host_clock.CYCCNT+=480U;assert(Chassis_Micros()-before==1U);
     host_clock.CYCCNT=0xffffff00U;(void)Chassis_Micros();before=Chassis_Micros();
