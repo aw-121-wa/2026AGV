@@ -8,8 +8,8 @@ static uint16_t heap[MAP_CELLS] AGV_RAM;
 static uint16_t position[MAP_CELLS] AGV_RAM;
 static uint8_t parent[MAP_CELLS] AGV_RAM;
 static uint16_t count, start_id, goal_id, path_len, trace_id;
-static uint16_t min_r, min_c, max_r, max_c;
-static unsigned clear_index;
+static uint16_t min_r, min_c, max_r, max_c, goal_r, goal_c;
+static uint16_t clear_r, clear_c;
 static uint8_t phase;
 static uint32_t version;
 static AStarStatus status;
@@ -18,8 +18,8 @@ static const int dr[4] = {-1, 1, 0, 0}, dc[4] = {0, 0, -1, 1};
 /* 曼哈顿距离启发值，用于开放列表排序。 */
 static unsigned Heuristic(uint16_t n)
 {
-    int r = (int)(n / MAP_COLS) - (int)(goal_id / MAP_COLS);
-    int c = (int)(n % MAP_COLS) - (int)(goal_id % MAP_COLS);
+    int r = (int)(n / MAP_COLS) - (int)goal_r;
+    int c = (int)(n % MAP_COLS) - (int)goal_c;
     return (unsigned)((r < 0 ? -r : r) + (c < 0 ? -c : c));
 }
 
@@ -93,8 +93,11 @@ uint8_t AStar_Begin(MapCell a, MapCell b, uint16_t r0, uint16_t c0, uint16_t r1,
     max_c = c1;
     start_id = a.row * MAP_COLS + a.col;
     goal_id = b.row * MAP_COLS + b.col;
+    goal_r = b.row;
+    goal_c = b.col;
     count = 0;
-    clear_index = 0;
+    clear_r = r0;
+    clear_c = c0;
     phase = 0;
     version = Map_Revision();
     status = ASTAR_BUSY;
@@ -111,12 +114,19 @@ void AStar_Step(unsigned budget)
         status = ASTAR_INVALIDATED;
         return;
     }
-    /* Clearing is also bounded: no large memset in the motor-control tick. */
+    /* 搜索只访问窗口内的栅格，所以只清窗口；清表也分拍完成，不在控制节拍里大块 memset。 */
     if (phase == 0)
     {
-        for (unsigned n = 0; n < budget * 16U && clear_index < MAP_CELLS; ++n)
-            position[clear_index++] = UNSEEN;
-        if (clear_index == MAP_CELLS)
+        for (unsigned n = 0; n < budget * 16U && clear_r <= max_r; ++n)
+        {
+            position[clear_r * MAP_COLS + clear_c] = UNSEEN;
+            if (++clear_c > max_c)
+            {
+                clear_c = min_c;
+                ++clear_r;
+            }
+        }
+        if (clear_r > max_r)
         {
             cost[start_id] = 0;
             heap[0] = start_id;
@@ -164,13 +174,9 @@ void AStar_Step(unsigned budget)
             if (r < min_r || r > max_r || c < min_c || c > max_c)
                 continue;
             uint16_t id = (uint16_t)(r * MAP_COLS + c);
+            /* 相邻两格的车身矩形沿一个轴重叠平移，并集正好是扫掠矩形，
+               所以两端都能停放就等价于这一步扫掠无碰撞，无需再做几何检查。 */
             if (position[id] == CLOSED || !Map_CanStand((uint16_t)r, (uint16_t)c))
-                continue;
-            /* Verify continuous sweep, including circles between grid centres. */
-            MapPoint a, b;
-            Map_GridToWorld((uint16_t)row, (uint16_t)col, &a);
-            Map_GridToWorld((uint16_t)r, (uint16_t)c, &b);
-            if (!Map_CanSegment(a, b, MAP_MARGIN_MM))
                 continue;
             uint16_t next = (uint16_t)(cost[n] + 1U);
             if (position[id] != UNSEEN && next >= cost[id])

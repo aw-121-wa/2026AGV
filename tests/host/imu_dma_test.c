@@ -10,11 +10,7 @@ static int starts, fail_start, command_events;
 static uint8_t *active_buffer;
 static uint16_t active_size, producer;
 static UART_HandleTypeDef *active_uart;
-static MPU_Region_InitTypeDef configured_region;
 uint32_t HAL_GetTick(void) { return tick_ms; }
-void HAL_MPU_Disable(void) {}
-void HAL_MPU_Enable(uint32_t mode) { assert(mode == MPU_PRIVILEGED_DEFAULT); }
-void HAL_MPU_ConfigRegion(MPU_Region_InitTypeDef *region) { configured_region = *region; }
 HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef *uart) {
     uart->RxState = HAL_UART_STATE_READY;
     return HAL_OK;
@@ -30,8 +26,8 @@ void ChassisCmd_RxEvent(UART_HandleTypeDef *uart,uint16_t size) {
     (void)size;
     if (uart != active_uart) ++command_events;
 }
-#include "../../APP/HWT101/hwt101.c"
-#include "../../APP/uart_callbacks.c"
+#include "../../User/Drivers/HWT101/hwt101.c"
+#include "../../User/Comm/uart_callbacks.c"
 
 static void bytes(const uint8_t *data, unsigned n, int idle, int process) {
     for(unsigned i=0;i<n;i++) {
@@ -57,8 +53,6 @@ int main(void) {
     assert(HWT101_Init(&other)==HAL_ERROR);
     assert(HWT101_Init(&uart)==HAL_OK);
     assert(HWT101_Init(&uart)==HAL_BUSY);
-    assert(configured_region.Size==MPU_REGION_SIZE_256B);
-    assert(configured_region.IsCacheable==MPU_ACCESS_NOT_CACHEABLE);
     assert(((uintptr_t)active_buffer%256)==0);
     uint8_t f[11];yaw_frame(f,16384);tick_ms=10;
     bytes(f,5,1,1);assert(!imu.valid);

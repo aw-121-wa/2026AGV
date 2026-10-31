@@ -1,6 +1,7 @@
 #include "main.h"
 #include "chassis.h"
 #include "hwt101.h"
+#include "user_math.h"
 #include <string.h>
 #include <math.h>
 
@@ -57,7 +58,7 @@ static const int8_t k_sign[CHASSIS_WHEEL_NUM][3] = {
 chassis_t chassis;
 static zdt_motor *wheel[CHASSIS_WHEEL_NUM];
 static uint32_t s_last_us;                    // 上一拍的时间戳
-static int16_t s_last_rpm[CHASSIS_WHEEL_NUM]; // 上次成功下发的轮速
+static int16_t s_last_rpm[CHASSIS_WHEEL_NUM]; // 上次成功下发的轮速，0.1 RPM
 static uint8_t s_force_apply;                 // 1 = 下一拍无条件重发全部轮速
 static volatile uint8_t s_move_req;           // 1 = 有未处理的定距移动请求
 static volatile float s_move_forward;         // 请求的纵向距离，mm
@@ -82,17 +83,6 @@ static float s_prev_deg[CHASSIS_WHEEL_NUM];
 static uint32_t s_prev_seq[CHASSIS_WHEEL_NUM];
 static uint8_t s_odom_valid;
 
-/* 把角度归一化到 (-180, 180]，用于计算最短航向误差。 */
-static float Chassis_Wrap(float angle)
-{
-    angle = fmodf(angle, 360.0f);
-    if (angle > 180.0f)
-        angle -= 360.0f;
-    if (angle < -180.0f)
-        angle += 360.0f;
-    return angle;
-}
-
 /* 判断陀螺仪与四轮反馈是否新鲜：全部有效且未超时才返回 1。 */
 static uint8_t Chassis_FeedbackReady(void)
 {
@@ -115,16 +105,6 @@ static uint8_t Chassis_FeedbackReady(void)
     return 1U;
 }
 
-/* 把数值限幅到 ±lim，用于速度指令保护。 */
-static float Chassis_Clamp(float x, float lim)
-{
-    if (x > lim)
-        return lim;
-    if (x < -lim)
-        return -lim;
-    return x;
-}
-
 /* 每周期最多变化 step，把当前值朝目标值做斜坡逼近。 */
 static float Chassis_Ramp(float cur, float tgt, float step)
 {
@@ -136,64 +116,52 @@ static float Chassis_Ramp(float cur, float tgt, float step)
     return tgt;
 }
 
-/* 逆运动学：车体速度 -> 四轮 RPM，并做整体等比限幅 */
+/* 逆运动学：车体速度 -> 四轮转速（0.1 RPM），并做整体等比限幅。 */
 static void Chassis_Solve(const chassis_vel *v, int16_t out[CHASSIS_WHEEL_NUM])
 {
-    const float rpm_per_mmps =
-        60.0f / (3.14159265f * CHASSIS_WHEEL_DIA_MM); //轮子转一圈移动的距离 = πD，mm/s -> RPM
-    const float w_rad = v->wz * 0.01745329f;          // deg/s -> rad/s
+    /* 轮子转一圈移动 πD，mm/s -> 0.1 RPM */
+    const float rpm_x10_per_mmps = 600.0f * CHASSIS_GEAR_RATIO / (MATH_PI * CHASSIS_WHEEL_DIA_MM);
+    const float w_mm = CHASSIS_K_MM * v->wz * MATH_DEG_TO_RAD;
     float raw[CHASSIS_WHEEL_NUM];
     float peak = 0.0f;
 
     for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM; ++i)
     {
-        float v_wheel = (float)k_sign[i][0] * v->vx + (float)k_sign[i][1] * v->vy +
-                        (float)k_sign[i][2] * CHASSIS_K_MM * w_rad;
-        raw[i] = v_wheel * rpm_per_mmps * CHASSIS_GEAR_RATIO;
-
-        if (raw[i] > peak)
-            peak = raw[i];
-        else if (-raw[i] > peak)
-            peak = -raw[i];
+        float v_wheel =
+            (float)k_sign[i][0] * v->vx + (float)k_sign[i][1] * v->vy + (float)k_sign[i][2] * w_mm;
+        raw[i] = v_wheel * rpm_x10_per_mmps;
+        if (fabsf(raw[i]) > peak)
+            peak = fabsf(raw[i]);
     }
 
-    /* 超限时四轮同乘一个系数，合速度方向不变。
-       若改成逐个 clamp，超限的那个轮子被截短，车会歪着走。 */
-    float scale = 1.0f;
-    if (peak > (float)CHASSIS_MAX_WHEEL_RPM)
-    {
-        scale = (float)CHASSIS_MAX_WHEEL_RPM / peak;
-    }
-
+    /* 超限时四轮同乘一个系数，合速度方向不变；逐个 clamp 会让车走歪。 */
+    const float limit = (float)CHASSIS_MAX_WHEEL_RPM * 10.0f;
+    float scale = peak > limit ? limit / peak : 1.0f;
     for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM; ++i)
-    {
         out[i] = (int16_t)lroundf(raw[i] * scale);
-    }
 }
 
-/* 只在轮速变化或到强制重发周期时才发帧 */
+/* 四轮速度带同步标志入队，再广播一次触发，使四轮同时变速。
+   只在轮速变化或到强制重发周期时发送；任一轮入队失败就不触发，下拍整组重发。 */
 static void Chassis_Apply(void)
 {
-    uint8_t failed = 0U;
-    uint8_t force = s_force_apply || ((chassis.cycle % CHASSIS_RESEND_DIV) == 0U);
+    uint8_t changed = s_force_apply || ((chassis.cycle % CHASSIS_RESEND_DIV) == 0U);
+    for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM && !changed; ++i)
+        changed = chassis.wheel_rpm_x10[i] != s_last_rpm[i];
+    if (!changed)
+        return;
 
+    s_force_apply = 1U;
+    if (ZDT_TxFreeLevel() < CHASSIS_WHEEL_NUM + 1U)
+        return;
     for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM; ++i)
-    {
-        if (wheel[i] == NULL)
-            continue;
-        if (!force && (chassis.wheel_rpm[i] == s_last_rpm[i]))
-            continue;
-
-        if (ZDT_SetSpeed(wheel[i], chassis.wheel_rpm[i], CHASSIS_DRV_ACC) == HAL_OK)
-        {
-            s_last_rpm[i] = chassis.wheel_rpm[i];
-        }
-        else
-            failed = 1U;
-        /* 返回 ERROR 时不更新 s_last_rpm，下个周期自动重试 */
-    }
-
-    s_force_apply = failed;
+        if (ZDT_SetSpeed(wheel[i], chassis.wheel_rpm_x10[i], CHASSIS_DRV_ACC, ZDT_SYNC_CACHE) !=
+            HAL_OK)
+            return;
+    if (ZDT_SyncTrigger() != HAL_OK)
+        return;
+    memcpy(s_last_rpm, chassis.wheel_rpm_x10, sizeof(s_last_rpm));
+    s_force_apply = 0U;
 }
 
 /* 检查四轮是否有堵转或驱动器保护标志。 */
@@ -236,17 +204,25 @@ static void Chassis_StopAll(void)
     for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM; ++i)
     {
         if (wheel[i] != NULL)
-            (void)ZDT_Stop(wheel[i]);
+            (void)ZDT_Stop(wheel[i], ZDT_SYNC_NOW);
     }
 }
 
-/* 每轮只问一个轴，避免 12 条反馈命令挤爆深度 8 的 TX FIFO */
-static void Chassis_RequestOne(void)
+/* 每 CHASSIS_FEEDBACK_DIV 拍同时读取四轮位置，保证里程计用的是同一时刻的四轮数据；
+   错开半个周期轮询一个轴的转速和状态，单拍最多 4 帧，不挤占速度命令的 TX FIFO。 */
+static void Chassis_RequestFeedback(void)
 {
-    uint8_t idx = (uint8_t)((chassis.cycle / CHASSIS_FEEDBACK_DIV) % CHASSIS_WHEEL_NUM);
-    if (wheel[idx] != NULL)
+    uint32_t phase = chassis.cycle % CHASSIS_FEEDBACK_DIV;
+    if (phase == 0U)
     {
-        (void)ZDT_RequestFeedback(wheel[idx]);
+        for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM; ++i)
+            (void)ZDT_RequestPosition(wheel[i]);
+    }
+    else if (phase == CHASSIS_FEEDBACK_DIV / 2U)
+    {
+        zdt_motor *motor = wheel[(chassis.cycle / CHASSIS_FEEDBACK_DIV) % CHASSIS_WHEEL_NUM];
+        (void)ZDT_RequestSpeed(motor);
+        (void)ZDT_RequestStatus(motor);
     }
 }
 
@@ -259,8 +235,8 @@ static void Chassis_UpdateYaw(void)
     __set_PRIMASK(irq);
     if (sample.valid && isfinite(sample.yaw) &&
         HAL_GetTick() - sample.updated_ms <= CHASSIS_FEEDBACK_TIMEOUT_MS)
-        chassis.yaw = Chassis_Wrap(CHASSIS_YAW_SIGN * sample.yaw);
-    chassis.heading_error = Chassis_Wrap(chassis.heading_target - chassis.yaw);
+        chassis.yaw = Math_WrapDeg(CHASSIS_YAW_SIGN * sample.yaw);
+    chassis.heading_error = Math_WrapDeg(chassis.heading_target - chassis.yaw);
 }
 
 /* 四轮位置均更新后才累计位移，航向单独跟随新鲜 IMU。 */
@@ -271,7 +247,7 @@ static void Chassis_UpdateOdometry(void)
     /* 四轮位置均更新后才计算增量，不对旧速度反复积分。 */
     for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM; ++i)
     {
-        chassis.wheel_rpm_meas[i] = (int16_t)wheel[i]->speed_rpm;
+        chassis.wheel_rpm_meas[i] = wheel[i]->speed_rpm;
         if (!wheel[i]->position_seq || wheel[i]->position_seq == s_prev_seq[i])
             return;
     }
@@ -279,7 +255,7 @@ static void Chassis_UpdateOdometry(void)
     for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM; ++i)
     {
         d[i] = (wheel[i]->position_deg - s_prev_deg[i]) *
-               (3.14159265f * CHASSIS_WHEEL_DIA_MM / (360.0f * CHASSIS_GEAR_RATIO));
+               (MATH_PI * CHASSIS_WHEEL_DIA_MM / (360.0f * CHASSIS_GEAR_RATIO));
         s_prev_deg[i] = wheel[i]->position_deg;
         s_prev_seq[i] = wheel[i]->position_seq;
     }
@@ -290,7 +266,7 @@ static void Chassis_UpdateOdometry(void)
     }
     float dx = 0.25f * (d[0] + d[1] + d[2] + d[3]);
     float dy = 0.25f * (-d[0] + d[1] + d[2] - d[3]);
-    float rad = chassis.yaw * 0.01745329252f;
+    float rad = chassis.yaw * MATH_DEG_TO_RAD;
     chassis.pos_x += cosf(rad) * dx - sinf(rad) * dy;
     chassis.pos_y += sinf(rad) * dx + cosf(rad) * dy;
 }
@@ -305,11 +281,11 @@ static float Chassis_HeadingControl(float dt, uint8_t stationary)
         return 0.0f;
     }
     if (fabsf(error) < CHASSIS_HEADING_I_ZONE)
-        s_heading_integral = Chassis_Clamp(s_heading_integral + CHASSIS_HEADING_KI * error * dt,
-                                           CHASSIS_HEADING_I_MAX);
+        s_heading_integral =
+            Math_Clamp(s_heading_integral + CHASSIS_HEADING_KI * error * dt, CHASSIS_HEADING_I_MAX);
     else
         s_heading_integral = 0.0f;
-    return Chassis_Clamp(CHASSIS_HEADING_KP * error + s_heading_integral, CHASSIS_TURN_MAX_SPEED);
+    return Math_Clamp(CHASSIS_HEADING_KP * error + s_heading_integral, CHASSIS_TURN_MAX_SPEED);
 }
 
 /* 定距/转向闭环：距离 P 环和航向 PI 环，持续停稳后完成，超时判故障。 */
@@ -318,12 +294,12 @@ static void Chassis_AutoControl(float dt, uint32_t now)
     float ex = s_goal_x - chassis.pos_x;
     float ey = s_goal_y - chassis.pos_y;
     float distance = hypotf(ex, ey);
-    chassis.heading_error = Chassis_Wrap(chassis.heading_target - chassis.yaw);
+    chassis.heading_error = Math_WrapDeg(chassis.heading_target - chassis.yaw);
     float vx = 0.0f, vy = 0.0f;
     if (chassis.mode == CHASSIS_MODE_MOVE && distance > CHASSIS_DISTANCE_TOL_MM)
     {
         float speed = fminf(CHASSIS_DISTANCE_KP * distance, s_move_speed_limit);
-        float rad = chassis.yaw * 0.01745329252f;
+        float rad = chassis.yaw * MATH_DEG_TO_RAD;
         vx = speed * (cosf(rad) * ex + sinf(rad) * ey) / distance;
         vy = speed * (-sinf(rad) * ex + cosf(rad) * ey) / distance;
     }
@@ -427,8 +403,7 @@ void Chassis_Update(void)
     /* ---- 1. 先把中断收到的帧解析掉 ---- */
     ZDT_ProcessData();
 
-    if ((chassis.cycle % CHASSIS_FEEDBACK_DIV) == 0U)
-        Chassis_RequestOne();
+    Chassis_RequestFeedback();
     Chassis_UpdateYaw();
     Chassis_UpdateOdometry();
     if (chassis.state == CHASSIS_STATE_IDLE)
@@ -475,7 +450,7 @@ void Chassis_Update(void)
     chassis.current.wz = Chassis_Ramp(chassis.current.wz, chassis.target.wz, step_ang);
 
     /* ---- 8. 解算 + 限幅 ---- */
-    Chassis_Solve(&chassis.current, chassis.wheel_rpm);
+    Chassis_Solve(&chassis.current, chassis.wheel_rpm_x10);
 
     /* ---- 9. 下发 ---- */
     Chassis_Apply();
@@ -487,9 +462,9 @@ void Chassis_SetVelocity(float vx, float vy, float wz)
     if (!isfinite(vx) || !isfinite(vy) || !isfinite(wz) || chassis.state != CHASSIS_STATE_READY ||
         chassis.mode != CHASSIS_MODE_VEL)
         return;
-    chassis.target.vx = Chassis_Clamp(vx, CHASSIS_MAX_LINEAR);
-    chassis.target.vy = Chassis_Clamp(vy, CHASSIS_MAX_LINEAR);
-    chassis.target.wz = Chassis_Clamp(wz, CHASSIS_MAX_ANGULAR);
+    chassis.target.vx = Math_Clamp(vx, CHASSIS_MAX_LINEAR);
+    chassis.target.vy = Math_Clamp(vy, CHASSIS_MAX_LINEAR);
+    chassis.target.wz = Math_Clamp(wz, CHASSIS_MAX_ANGULAR);
     if (wz != 0.0f)
     {
         s_heading_hold = 0U;
@@ -508,7 +483,7 @@ void Chassis_Stop(void)
 {
     memset(&chassis.target, 0, sizeof(chassis.target));
     memset(&chassis.current, 0, sizeof(chassis.current));
-    memset(chassis.wheel_rpm, 0, sizeof(chassis.wheel_rpm));
+    memset(chassis.wheel_rpm_x10, 0, sizeof(chassis.wheel_rpm_x10));
     memset(s_last_rpm, 0, sizeof(s_last_rpm));
     s_move_req = 0U; // 丢掉还没执行的移动请求
     chassis.mode = CHASSIS_MODE_VEL;
@@ -540,23 +515,29 @@ static HAL_StatusTypeDef Chassis_StartMotion(chassis_mode mode, float heading)
     return HAL_OK;
 }
 
-/* 定距移动：把车体系位移换算成世界系目标点，并锁定当前航向。 */
-HAL_StatusTypeDef Chassis_MoveDistance(float forward_mm, float left_mm)
+/* 定距移动：把车体系位移换算成世界系目标点，移动中保持 heading_deg。 */
+HAL_StatusTypeDef Chassis_MoveDistanceHold(float forward_mm, float left_mm, float heading_deg)
 {
-    if (!isfinite(forward_mm) || !isfinite(left_mm) ||
+    if (!isfinite(forward_mm) || !isfinite(left_mm) || !isfinite(heading_deg) ||
         hypotf(forward_mm, left_mm) > CHASSIS_MOVE_MAX_MM ||
         (forward_mm == 0.0f && left_mm == 0.0f))
         return HAL_ERROR;
-    HAL_StatusTypeDef status = Chassis_StartMotion(CHASSIS_MODE_MOVE, chassis.yaw);
+    HAL_StatusTypeDef status = Chassis_StartMotion(CHASSIS_MODE_MOVE, heading_deg);
     if (status != HAL_OK)
         return status;
-    float rad = chassis.yaw * 0.01745329252f;
+    float rad = chassis.yaw * MATH_DEG_TO_RAD;
     s_goal_x = chassis.pos_x + cosf(rad) * forward_mm - sinf(rad) * left_mm;
     s_goal_y = chassis.pos_y + sinf(rad) * forward_mm + cosf(rad) * left_mm;
     /* 按本次实际限速估算，另留减速/航向收敛余量；最短仍保留 30 秒。 */
     float seconds = 2.0f * hypotf(forward_mm, left_mm) / s_move_speed_limit + 10.0f;
     s_move_timeout_us = (uint32_t)fmaxf((float)CHASSIS_MOVE_TIMEOUT_US, seconds * 1000000.0f);
     return HAL_OK;
+}
+
+/* 定距移动并锁定当前航向。 */
+HAL_StatusTypeDef Chassis_MoveDistance(float forward_mm, float left_mm)
+{
+    return Chassis_MoveDistanceHold(forward_mm, left_mm, chassis.yaw);
 }
 
 /* 转向到绝对航向角，输入范围 [-180, 180] 度。 */

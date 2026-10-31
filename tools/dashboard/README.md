@@ -39,7 +39,7 @@ COM3 仅为示例，按枚举结果和插拔确认实际端口。串口桥接需
 
 ## 已实现的遥测
 
-模块为 `APP/Chassis_motor/chassis_telemetry.c`，由底盘任务调用，使用 HAL_UART_Transmit_IT。静态缓冲区在发送完成前不被重写；串口忙时不等待、不打断控制。正常遥测 20 Hz，回执优先。格式化只使用整数，避免依赖 printf 浮点配置。
+模块为 `User/Comm/chassis_telemetry.c`，由底盘任务调用，使用 HAL_UART_Transmit_IT。静态缓冲区在发送完成前不被重写；串口忙时不等待、不打断控制。正常遥测 20 Hz，回执优先。格式化只使用整数，避免依赖 printf 浮点配置。
 
 ```text
 $T,<ms>,<x>,<y>,<yaw>,<hdgT>,<hdgE>,<state>,<mode>,<r1t>,<r1m>,<r2t>,<r2m>,<r3t>,<r3m>,<r4t>,<r4m>

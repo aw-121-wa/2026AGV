@@ -1,4 +1,4 @@
-﻿#include <assert.h>
+#include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include "chassis.h"
@@ -12,7 +12,8 @@ static unsigned physical_edges,test_zone,freeze;
 uint32_t HAL_GetTick(void) { return now; }
 void Chassis_Stop(void) { chassis.mode=CHASSIS_MODE_VEL; }
 void Chassis_SetMoveSpeedLimit(float x) { (void)x; }
-HAL_StatusTypeDef Chassis_MoveDistance(float x,float y) {
+HAL_StatusTypeDef Chassis_MoveDistanceHold(float x,float y,float heading) {
+ (void)heading;
  if(chassis.state!=CHASSIS_STATE_READY) return HAL_BUSY;
  float a=chassis.yaw*0.01745329252f;
  gx=chassis.pos_x+cosf(a)*x-sinf(a)*y; gy=chassis.pos_y+sinf(a)*x+cosf(a)*y;
@@ -77,17 +78,23 @@ int main(void) { setvbuf(stdout, NULL, _IONBF, 0);
  for(unsigned n=0;n<1000 && agv.state==AGV_WAIT;++n) tick();
  assert(Map_AddObstacle(1200,1200,25)); tick();
  assert(agv.state==AGV_FAULT && agv.error==AGV_ERR_MAP);
- /* The stricter dynamic heading limit is enforced independently of collision. */
+ /* Heading fault needs a sustained excursion; a transient spike is tolerated. */
  chassis=(chassis_t){0}; chassis.state=CHASSIS_STATE_READY;
  Agv_Init(AGV_MODE_SURVEY,1);
  for(unsigned n=0;n<1000 && agv.state==AGV_WAIT;++n) tick();
- chassis.yaw=0.19f;tick();assert(agv.state!=AGV_FAULT);
- chassis.yaw=0.21f;tick();assert(agv.state==AGV_FAULT && agv.error==AGV_ERR_POSE);
+ freeze=1;
+ chassis.yaw=0.5f;tick();assert(agv.state!=AGV_FAULT);
+ chassis.yaw=2.9f;for(unsigned n=0;n<60;++n) tick();assert(agv.state!=AGV_FAULT);
+ chassis.yaw=3.1f;for(unsigned n=0;n<30;++n) tick();assert(agv.state!=AGV_FAULT);
+ chassis.yaw=0;tick();
+ chassis.yaw=3.1f;for(unsigned n=0;n<50 && agv.state!=AGV_FAULT;++n) tick();
+ assert(agv.state==AGV_FAULT && agv.error==AGV_ERR_POSE);
+ freeze=0;
  /* During ordinary planning, physical clearance alone is insufficient. */
  chassis=(chassis_t){0}; chassis.state=CHASSIS_STATE_READY;
  Agv_Init(AGV_MODE_SURVEY,1);
- for(unsigned n=0;n<2000 && agv.state!=AGV_PLAN;++n) tick();
- assert(agv.state==AGV_PLAN);
+ for(unsigned n=0;n<2000 && agv.state!=AGV_DRIVE;++n) tick();
+ assert(agv.state==AGV_DRIVE); /* clear channel: straight-line fast path, no A* */
  chassis.pos_x=-260; chassis.pos_y=-260; /* field (1990,1990), body clears by 5 mm */
  tick();
  assert(agv.state==AGV_FAULT && agv.error==AGV_ERR_POSE);

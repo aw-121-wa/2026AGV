@@ -1,5 +1,6 @@
 #include "map.h"
 #include "agv_config.h"
+#include "user_math.h"
 #include <math.h>
 #include <string.h>
 
@@ -14,7 +15,9 @@ typedef struct
     uint16_t radius;
 } Obstacle;
 
-static uint8_t map_grid[MAP_ROWS][MAP_COLS] AGV_RAM;
+/* 构型空间位图：bit=1 表示车身（含 MAP_MARGIN_MM）能以该栅格中心停放。
+   7.2 KB，替代原来规划用不上的 57.6 KB 原始占据栅格。 */
+static uint8_t stand_bits[(MAP_CELLS + 7U) / 8U] AGV_RAM;
 static Obstacle obstacles[MAP_MAX_OBSTACLES];
 static uint8_t obstacle_count, initialized;
 static uint32_t revision;
@@ -55,15 +58,31 @@ static uint8_t BoxFree(Rect b)
     return 1;
 }
 
-/* 按 10 mm 栅格逐格重建整张占据地图。 */
-static void BuildGrid(void)
+static Rect RobotBox(float x, float y, float margin)
 {
-    for (unsigned r = 0; r < MAP_ROWS; ++r)
-        for (unsigned c = 0; c < MAP_COLS; ++c)
+    float hx = ROBOT_LENGTH_MM * 0.5f + margin, hy = ROBOT_WIDTH_MM * 0.5f + margin;
+    return (Rect){x - hx, y - hy, x + hx, y + hy};
+}
+
+static float CellCentre(uint16_t index)
+{
+    return index * MAP_CELL_MM + MAP_CELL_MM * 0.5f;
+}
+
+/* 重新计算 [r0,r1]x[c0,c1] 内的可停放位；only_clear 时只把原来可停放的格子置为不可停放。 */
+static void BuildStand(uint16_t r0, uint16_t c0, uint16_t r1, uint16_t c1, uint8_t only_clear)
+{
+    for (uint16_t r = r0; r <= r1; ++r)
+        for (uint16_t c = c0; c <= c1; ++c)
         {
-            Rect b = {(float)c * MAP_CELL_MM, (float)r * MAP_CELL_MM, (float)(c + 1) * MAP_CELL_MM,
-                      (float)(r + 1) * MAP_CELL_MM};
-            map_grid[r][c] = BoxFree(b) ? MAP_FREE : MAP_BLOCKED;
+            unsigned id = (unsigned)r * MAP_COLS + c;
+            uint8_t mask = (uint8_t)(1U << (id & 7U));
+            if (only_clear && !(stand_bits[id >> 3] & mask))
+                continue;
+            if (BoxFree(RobotBox(CellCentre(c), CellCentre(r), MAP_MARGIN_MM)))
+                stand_bits[id >> 3] |= mask;
+            else
+                stand_bits[id >> 3] &= (uint8_t)~mask;
         }
 }
 
@@ -72,7 +91,7 @@ void Map_Init(void)
 {
     obstacle_count = 0;
     memset(obstacles, 0, sizeof(obstacles));
-    BuildGrid();
+    BuildStand(0, 0, MAP_ROWS - 1U, MAP_COLS - 1U, 0U);
     initialized = 1;
     ++revision;
 }
@@ -86,7 +105,10 @@ uint32_t Map_Revision(void)
 /* 查询某个栅格是否可通行。 */
 uint8_t Map_IsFree(uint16_t row, uint16_t col)
 {
-    return initialized && row < MAP_ROWS && col < MAP_COLS && map_grid[row][col] == MAP_FREE;
+    if (!initialized || row >= MAP_ROWS || col >= MAP_COLS)
+        return 0;
+    return BoxFree((Rect){(float)col * MAP_CELL_MM, (float)row * MAP_CELL_MM,
+                          (float)(col + 1U) * MAP_CELL_MM, (float)(row + 1U) * MAP_CELL_MM});
 }
 
 /* 用车体外接矩形判断该位置放不放得下车（不考虑朝向）。 */
@@ -94,18 +116,16 @@ uint8_t Map_CanPose(float x, float y, float margin)
 {
     if (!initialized || !isfinite(x) || !isfinite(y) || !isfinite(margin) || margin < 0)
         return 0;
-    float hx = ROBOT_LENGTH_MM * 0.5f + margin, hy = ROBOT_WIDTH_MM * 0.5f + margin;
-    Rect b = {x - hx, y - hy, x + hx, y + hy};
-    return BoxFree(b);
+    return BoxFree(RobotBox(x, y, margin));
 }
 
-/* 判断某个栅格中心按给定余量能否停车。 */
+/* 查表判断栅格中心能否容纳车身和默认余量，O(1)。 */
 uint8_t Map_CanStand(uint16_t row, uint16_t col)
 {
-    if (row >= MAP_ROWS || col >= MAP_COLS)
+    if (!initialized || row >= MAP_ROWS || col >= MAP_COLS)
         return 0;
-    return Map_CanPose(col * MAP_CELL_MM + MAP_CELL_MM * 0.5f,
-                       row * MAP_CELL_MM + MAP_CELL_MM * 0.5f, MAP_MARGIN_MM);
+    unsigned id = (unsigned)row * MAP_COLS + col;
+    return (stand_bits[id >> 3] >> (id & 7U)) & 1U;
 }
 
 /* 带朝向的车体包络检查，用轴对齐外框做保守估计。 */
@@ -114,7 +134,7 @@ uint8_t Map_CanPoseHeading(float x, float y, float heading_deg, float margin)
     if (!initialized || !isfinite(x) || !isfinite(y) || !isfinite(heading_deg) ||
         !isfinite(margin) || margin < 0)
         return 0;
-    float a = heading_deg * 0.01745329252f, c = fabsf(cosf(a)), s = fabsf(sinf(a));
+    float a = heading_deg * MATH_DEG_TO_RAD, c = fabsf(cosf(a)), s = fabsf(sinf(a));
     float hx = (ROBOT_LENGTH_MM * c + ROBOT_WIDTH_MM * s) * 0.5f + margin;
     float hy = (ROBOT_LENGTH_MM * s + ROBOT_WIDTH_MM * c) * 0.5f + margin;
     /* Axis-aligned envelope of rotated rectangle: conservative. */
@@ -159,7 +179,14 @@ uint8_t Map_AddObstacle(int32_t x, int32_t y, uint16_t radius)
         x < 0 || y < 0 || x >= MAP_WIDTH_MM || y >= MAP_HEIGHT_MM)
         return 0;
     obstacles[obstacle_count++] = (Obstacle){x, y, radius};
-    BuildGrid();
+    /* 新障碍只会减少可停放区域，只重算它能影响到的矩形范围。 */
+    int32_t reach_x = (int32_t)(ROBOT_LENGTH_MM / 2 + MAP_MARGIN_MM + radius + MAP_CELL_MM);
+    int32_t reach_y = (int32_t)(ROBOT_WIDTH_MM / 2 + MAP_MARGIN_MM + radius + MAP_CELL_MM);
+    int32_t c0 = (x - reach_x) / MAP_CELL_MM, c1 = (x + reach_x) / MAP_CELL_MM;
+    int32_t r0 = (y - reach_y) / MAP_CELL_MM, r1 = (y + reach_y) / MAP_CELL_MM;
+    BuildStand((uint16_t)(r0 < 0 ? 0 : r0), (uint16_t)(c0 < 0 ? 0 : c0),
+               (uint16_t)(r1 >= MAP_ROWS ? MAP_ROWS - 1 : r1),
+               (uint16_t)(c1 >= MAP_COLS ? MAP_COLS - 1 : c1), 1U);
     ++revision;
     return 1;
 }
@@ -169,6 +196,6 @@ uint8_t Map_StartPoint(uint8_t zone, MapPoint *p)
 {
     if (!p || (zone != 1 && zone != 2))
         return 0;
-    *p = (MapPoint){2250, zone == 1 ? 2250 : 150};
+    *p = (MapPoint){AGV_START_X_MM, AGV_START_Y_MM(zone)};
     return 1;
 }

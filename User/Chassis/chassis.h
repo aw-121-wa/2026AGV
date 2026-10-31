@@ -21,12 +21,12 @@
 #define CHASSIS_ACC_LINEAR    2000.0f // mm/s^2
 #define CHASSIS_ACC_FWD       CHASSIS_ACC_LINEAR
 #define CHASSIS_ACC_LAT       CHASSIS_ACC_LINEAR // 实测后独立标定，暂不猜测横向摩擦系数
-#define CHASSIS_MAX_WHEEL_RPM 400U               // 底盘轮速上限，独立于驱动器协议极限
-#define CHASSIS_ACC_ANGULAR   720.0f             // deg/s^2
+#define CHASSIS_MAX_WHEEL_RPM 400U   // 底盘轮速上限，独立于驱动器协议极限
+#define CHASSIS_ACC_ANGULAR   720.0f // deg/s^2
 
 /* 驱动器下发 */
-#define CHASSIS_DRV_ACC      0U  // ZDT 加速度档位，0 = 不额外限制，交给软件斜坡
-#define CHASSIS_FEEDBACK_DIV 4U  // 每 4 周期轮询一个轴，4 轴一圈 80 ms
+#define CHASSIS_DRV_ACC      0U // ZDT 加速度 RPM/s，0 = 驱动器不额外限制，交给软件斜坡
+#define CHASSIS_FEEDBACK_DIV 4U // 每 4 周期（20 ms）同时读四轮位置；转速/状态逐轴轮询，一圈 80 ms
 #define CHASSIS_ENABLE_DIV   20U // 每 20 周期（100 ms）重发使能
 #define CHASSIS_RESEND_DIV   20U // 每 20 周期（100 ms）强制重发速度，兜底丢帧
 
@@ -79,19 +79,19 @@ typedef enum
 
 typedef struct
 {
-    chassis_vel target;                        // 上位给的目标速度
-    chassis_vel current;                       // 斜坡后的实际下发速度
-    int16_t wheel_rpm[CHASSIS_WHEEL_NUM];      // 解算后的目标轮速
-    int16_t wheel_rpm_meas[CHASSIS_WHEEL_NUM]; // 反馈测得的轮速
-    float pos_x;                               // 里程计：世界坐标 X 位移，mm
-    float pos_y;                               // 里程计：世界坐标 Y 位移，mm
-    float heading_target;                      // deg
-    float heading_error;                       // 最短角误差，deg
-    float heading_peak_dynamic;                // 本次平移观测到的最大航向误差，deg
-    uint32_t heading_over_limit;               // 本次平移超出 0.2° 的控制周期数
-    float yaw;                                 // 航向角，deg
-    float dt_actual;                           // 本周期 DWT 实测步长，s
-    uint32_t jitter_us;                        // 观测到的最大节拍偏差，µs
+    chassis_vel target;                       // 上位给的目标速度
+    chassis_vel current;                      // 斜坡后的实际下发速度
+    int16_t wheel_rpm_x10[CHASSIS_WHEEL_NUM]; // 解算后的目标轮速，0.1 RPM
+    float wheel_rpm_meas[CHASSIS_WHEEL_NUM];  // 反馈测得的轮速，RPM
+    float pos_x;                              // 里程计：世界坐标 X 位移，mm
+    float pos_y;                              // 里程计：世界坐标 Y 位移，mm
+    float heading_target;                     // deg
+    float heading_error;                      // 最短角误差，deg
+    float heading_peak_dynamic;               // 本次平移观测到的最大航向误差，deg
+    uint32_t heading_over_limit;              // 本次平移超出 0.2° 的控制周期数
+    float yaw;                                // 航向角，deg
+    float dt_actual;                          // 本周期 DWT 实测步长，s
+    uint32_t jitter_us;                       // 观测到的最大节拍偏差，µs
     uint8_t state;
     uint8_t mode;   // 当前模式，取值见 chassis_mode
     uint32_t cycle; // 周期计数，用于分频
@@ -116,6 +116,8 @@ uint32_t Chassis_Micros(void);
 // 定距移动：起始车体系 forward_mm 向前、left_mm 向左。保持起始航向。
 // READY 且空闲、反馈新鲜才接受，否则 BUSY；距离向量超过 5000 mm 返回 ERROR。
 HAL_StatusTypeDef Chassis_MoveDistance(float forward_mm, float left_mm);
+// 同上，但移动中保持指定的绝对航向 heading_deg（用于跑图时锁定场地航向）。
+HAL_StatusTypeDef Chassis_MoveDistanceHold(float forward_mm, float left_mm, float heading_deg);
 // 空闲时设置下一次移动限速，范围 10~400 mm/s；运行中保持本次限速和超时一致。
 void Chassis_SetMoveSpeedLimit(float mm_per_second);
 // 单槽移动请求，可在中断里调用；已有待处理请求时保留旧请求。

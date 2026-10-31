@@ -16,7 +16,7 @@ HAL_StatusTypeDef HAL_UARTEx_ReceiveToIdle_IT(UART_HandleTypeDef *u,uint8_t *b,u
  (void)u;(void)b;(void)n;return HAL_OK;
 }
 uint32_t HAL_UARTEx_GetRxEventType(UART_HandleTypeDef *u) { (void)u;return HAL_UART_RXEVENT_IDLE; }
-#include "../../APP/Chassis_motor/chassis_cmd.c"
+#include "../../User/Comm/chassis_cmd.c"
 int main(void) {
  UART_HandleTypeDef u={0}; assert(ChassisCmd_Init(&u)==HAL_OK);
  memcpy(rx_buf,"F100",4); ChassisCmd_RxEvent(&u,4); ChassisCmd_Poll();

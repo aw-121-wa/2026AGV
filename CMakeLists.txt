@@ -45,25 +45,29 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
-    APP/HWT101/hwt101.c
-    APP/uart_callbacks.c
-    APP/ZDT_X42S/zdt_x42s.c
-    APP/Chassis_motor/chassis.c
-    APP/Chassis_motor/chassis_cmd.c
-    APP/Chassis_motor/chassis_telemetry.c
-    Astar/map.c
-    Astar/astar.c
-    Astar/survey.c
-    Astar/agv_run.c
+    User/Drivers/HWT101/hwt101.c
+    User/Drivers/ZDT_X42S/zdt_x42s.c
+    User/Chassis/chassis.c
+    User/Comm/chassis_cmd.c
+    User/Comm/chassis_telemetry.c
+    User/Comm/uart_callbacks.c
+    User/Navigation/map.c
+    User/Navigation/astar.c
+    User/Navigation/survey.c
+    User/App/agv_run.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
-    APP/HWT101
-    APP/ZDT_X42S
-    APP/Chassis_motor
-    Astar
+    User/Config
+    User/Common
+    User/Drivers/HWT101
+    User/Drivers/ZDT_X42S
+    User/Chassis
+    User/Comm
+    User/Navigation
+    User/App
 )
 
 # Add project symbols (macros)
@@ -71,7 +75,7 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
 )
 
-# Optional build-directory overrides; otherwise edit Astar/agv_config.h.
+# Optional build-directory overrides; otherwise edit User/Config/agv_config.h.
 if(DEFINED AGV_MODE)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE AGV_MODE=${AGV_MODE})
 endif()

@@ -32,12 +32,6 @@
 
 #define MAP_MAX_OBSTACLES 16
 
-typedef enum
-{
-    MAP_FREE = 0,
-    MAP_BLOCKED = 1
-} MapCellType;
-
 typedef struct
 {
     uint16_t row, col;
@@ -54,7 +48,7 @@ void Map_Init(void);
 /* 查询原始栅格是否空闲，不包含车身包络。 */
 uint8_t Map_IsFree(uint16_t row, uint16_t col);
 
-/* 判断栅格中心能否容纳车身和默认余量。 */
+/* 判断栅格中心能否容纳车身和默认余量（查预计算的构型空间位图）。 */
 uint8_t Map_CanStand(uint16_t row, uint16_t col);
 
 /* 将场地毫米坐标换算为行列号。 */

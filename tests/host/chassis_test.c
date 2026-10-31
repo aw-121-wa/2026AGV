@@ -14,7 +14,8 @@ uint32_t SystemCoreClock = 480000000U;
 static uint32_t ms;
 imu_data imu;
 static zdt_motor motors[4];
-static int16_t output[4];
+static float output[4]; /* RPM actually commanded to each wheel */
+static unsigned sync_triggers;
 static int fail_send;
 static uint32_t event_type = HAL_UART_RXEVENT_IDLE;
 static char tx_capture[512];
@@ -29,28 +30,39 @@ HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *u,uint8_t *b,uint16_t
 uint32_t HAL_GetTick(void) { return ms; }
 HAL_StatusTypeDef ZDT_Init(FDCAN_HandleTypeDef *p) { (void)p; return HAL_OK; }
 zdt_motor *ZDT_AddMotor(uint8_t a) { motors[a-1].address=a; return &motors[a-1]; }
-HAL_StatusTypeDef ZDT_SetSpeed(zdt_motor *m,int16_t rpm,uint8_t acc) {
+static float cached[4];
+HAL_StatusTypeDef ZDT_SetSpeed(zdt_motor *m,int16_t rpm_x10,uint16_t acc,zdt_sync sync) {
     (void)acc;
     if (fail_send) return HAL_ERROR;
-    output[m->address-1] = rpm; return HAL_OK;
+    if (sync==ZDT_SYNC_CACHE) cached[m->address-1]=rpm_x10*0.1f;
+    else output[m->address-1]=rpm_x10*0.1f;
+    return HAL_OK;
 }
-HAL_StatusTypeDef ZDT_Stop(zdt_motor *m) {
+HAL_StatusTypeDef ZDT_SyncTrigger(void) {
+    if (fail_send) return HAL_ERROR;
+    memcpy(output,cached,sizeof(output));++sync_triggers;return HAL_OK;
+}
+HAL_StatusTypeDef ZDT_Stop(zdt_motor *m,zdt_sync sync) {
+    (void)sync;
     if (fail_send) return HAL_ERROR;
     output[m->address-1]=0; return HAL_OK;
 }
+uint32_t ZDT_TxFreeLevel(void) { return 16U; }
 HAL_StatusTypeDef ZDT_EnableMotor(zdt_motor *m,uint8_t en) { m->enabled=en; return HAL_OK; }
-HAL_StatusTypeDef ZDT_RequestFeedback(zdt_motor *m) { (void)m; return HAL_OK; }
+HAL_StatusTypeDef ZDT_RequestPosition(zdt_motor *m) { (void)m; return HAL_OK; }
+HAL_StatusTypeDef ZDT_RequestSpeed(zdt_motor *m) { (void)m; return HAL_OK; }
+HAL_StatusTypeDef ZDT_RequestStatus(zdt_motor *m) { (void)m; return HAL_OK; }
 void ZDT_ProcessData(void) {}
 HAL_StatusTypeDef HAL_UARTEx_ReceiveToIdle_IT(UART_HandleTypeDef *u,uint8_t *b,uint16_t n) {
     (void)u;(void)b;(void)n;return HAL_OK;
 }
 uint32_t HAL_UARTEx_GetRxEventType(UART_HandleTypeDef *u) { (void)u;return event_type; }
-#include "../../APP/Chassis_motor/chassis.c"
-#include "../../APP/Chassis_motor/chassis_telemetry.c"
-#include "../../APP/Chassis_motor/chassis_cmd.c"
+#include "../../User/Chassis/chassis.c"
+#include "../../User/Comm/chassis_telemetry.c"
+#include "../../User/Comm/chassis_cmd.c"
 void HWT101_RxEvent(UART_HandleTypeDef *u, uint16_t n) { (void)u; (void)n; }
 void HWT101_RxError(UART_HandleTypeDef *u) { (void)u; }
-#include "../../APP/uart_callbacks.c"
+#include "../../User/Comm/uart_callbacks.c"
 
 static void feedback(void) {
     imu.valid=1;imu.updated_ms=ms;
@@ -73,7 +85,7 @@ static void plant(void) {
         motors[i].position_deg+=output[i]*6.0f*0.005f;
         v[i]=output[i]*3.14159265f*CHASSIS_WHEEL_DIA_MM/60.0f;
     }
-    imu.yaw=Chassis_Wrap(imu.yaw+(-v[0]+v[1]-v[2]+v[3])/
+    imu.yaw=Math_WrapDeg(imu.yaw+(-v[0]+v[1]-v[2]+v[3])/
         (4*CHASSIS_K_MM)*57.2957795f*0.005f);
     tick(1);
 }
@@ -94,14 +106,15 @@ static void sampled_move(void) {
             position[i]+=output[i]*6.0f*0.005f;
             v[i]=output[i]*3.14159265f*CHASSIS_WHEEL_DIA_MM/60.0f;
         }
-        imu.yaw=Chassis_Wrap(imu.yaw+(-v[0]+v[1]-v[2]+v[3])/
+        imu.yaw=Math_WrapDeg(imu.yaw+(-v[0]+v[1]-v[2]+v[3])/
             (4*CHASSIS_K_MM)*57.2957795f*0.005f);
         ms+=5;host_clock.CYCCNT+=2400000;imu.updated_ms=ms;
-        if(steps%4==0) { // One wheel each 20 ms, full sweep 80 ms.
-            int i=(steps/4)%4;
-            motors[i].position_deg=position[i];motors[i].speed_rpm=output[i];
-            motors[i].position_seq++;
-            motors[i].position_ms=motors[i].speed_ms=motors[i].status_ms=ms;
+        if(steps%4==0) { // All four positions sampled together every 20 ms.
+            for(int i=0;i<4;i++) {
+                motors[i].position_deg=position[i];motors[i].speed_rpm=output[i];
+                motors[i].position_seq++;
+                motors[i].position_ms=motors[i].speed_ms=motors[i].status_ms=ms;
+            }
         }
         Chassis_Update();
     }
@@ -150,10 +163,11 @@ int main(void) {
     imu.yaw+=0.15f;
     for(int i=0;i<200;i++) { Chassis_SetVelocity(100,0,0);tick(1); }
     assert(chassis.target.wz < -0.3f && chassis.target.wz > -0.6f);
+    assert(chassis.wheel_rpm_x10[0]!=chassis.wheel_rpm_x10[1]); /* sub-RPM correction reaches wheels */
     Chassis_Stop();
     chassis_vel combined={1200,1200,240};int16_t limited[4];
     Chassis_Solve(&combined,limited);
-    for(int i=0;i<4;i++) assert(abs(limited[i])<=400);
+    for(int i=0;i<4;i++) assert(abs(limited[i])<=4000); /* 0.1 RPM */
     imu.yaw=179;tick(1);
     assert(Chassis_TurnTo(-179)==HAL_OK);tick(1);
     assert(chassis.heading_error>0 && chassis.heading_error<3);
@@ -192,6 +206,9 @@ int main(void) {
     tick(1);assert(chassis.state==CHASSIS_STATE_FAULT);
     command(&uart,"S\n");assert(chassis.state==CHASSIS_STATE_READY);
     assert(output[0]==0 && output[1]==0 && output[2]==0 && output[3]==0);
+    /* Wheel speeds are cached with the sync flag and released by one trigger. */
+    unsigned triggers=sync_triggers;Chassis_SetVelocity(100,0,0);tick(1);
+    assert(sync_triggers==triggers+1 && output[0]>0 && output[0]==output[1]);
     Chassis_SetVelocity(100,0,0);tick(1);fail_send=1;Chassis_Stop();tick(1);
     assert(s_force_apply);fail_send=0;tick(1);assert(output[0]==0);
     assert(Chassis_MoveDistance(100,0)==HAL_OK);

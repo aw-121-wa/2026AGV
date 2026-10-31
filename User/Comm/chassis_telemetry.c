@@ -1,6 +1,7 @@
 #include "chassis_telemetry.h"
 #include "chassis.h"
 #include "agv_config.h"
+#include "user_math.h"
 #include <math.h>
 #include <stdio.h>
 
@@ -32,6 +33,12 @@ static void Fixed(char out[24], float value)
     unsigned long magnitude = (unsigned long)(raw < 0 ? -raw : raw);
     (void)snprintf(out, 24, "%s%lu.%03lu", raw < 0 ? "-" : "", magnitude / 1000U,
                    magnitude % 1000U);
+}
+
+/* 遥测轮速保持整数 RPM，兼容上位机解析。 */
+static int Rpm(float rpm)
+{
+    return (int)lroundf(rpm);
 }
 
 /* 初始化串口与回执队列；场地原点在首次 READY 时采集。 */
@@ -88,10 +95,10 @@ void ChassisTelemetry_Poll(void)
     {
         if (now - last_tx < TELEMETRY_PERIOD_MS || !origin_valid)
             return;
-        float a = origin_yaw * 0.01745329252f;
+        float a = origin_yaw * MATH_DEG_TO_RAD;
         float dx = chassis.pos_x - origin_x, dy = chassis.pos_y - origin_y;
-        float x = 2250.0f + cosf(a) * dx + sinf(a) * dy;
-        float y = (AGV_START_ZONE == 1 ? 2250.0f : 150.0f) - sinf(a) * dx + cosf(a) * dy;
+        float x = (float)AGV_START_X_MM + cosf(a) * dx + sinf(a) * dy;
+        float y = (float)AGV_START_Y_MM(AGV_START_ZONE) - sinf(a) * dx + cosf(a) * dy;
         char v[11][24];
         Fixed(v[0], x);
         Fixed(v[1], y);
@@ -108,11 +115,13 @@ void ChassisTelemetry_Poll(void)
                      "$T,%lu,%s,%s,%s,%s,%s,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d\n"
                      "$V,%s,%s,%s,%s,%lu\n$H,%s,%lu,%lu,%lu\n$C,%s\n",
                      (unsigned long)now, v[0], v[1], v[2], v[3], v[4], chassis.state, chassis.mode,
-                     chassis.wheel_rpm[0], chassis.wheel_rpm_meas[0], chassis.wheel_rpm[1],
-                     chassis.wheel_rpm_meas[1], chassis.wheel_rpm[2], chassis.wheel_rpm_meas[2],
-                     chassis.wheel_rpm[3], chassis.wheel_rpm_meas[3], v[5], v[6], v[7], v[8],
-                     (unsigned long)chassis.cycle, v[9], (unsigned long)chassis.heading_over_limit,
-                     (unsigned long)chassis.jitter_us, (unsigned long)ack_dropped, v[10]);
+                     Rpm(chassis.wheel_rpm_x10[0] * 0.1f), Rpm(chassis.wheel_rpm_meas[0]),
+                     Rpm(chassis.wheel_rpm_x10[1] * 0.1f), Rpm(chassis.wheel_rpm_meas[1]),
+                     Rpm(chassis.wheel_rpm_x10[2] * 0.1f), Rpm(chassis.wheel_rpm_meas[2]),
+                     Rpm(chassis.wheel_rpm_x10[3] * 0.1f), Rpm(chassis.wheel_rpm_meas[3]), v[5],
+                     v[6], v[7], v[8], (unsigned long)chassis.cycle, v[9],
+                     (unsigned long)chassis.heading_over_limit, (unsigned long)chassis.jitter_us,
+                     (unsigned long)ack_dropped, v[10]);
     }
     if (n <= 0 || (unsigned)n >= sizeof(tx))
         return;

@@ -3,24 +3,16 @@
 #include "astar.h"
 #include "survey.h"
 #include "chassis.h"
+#include "user_math.h"
 #include <math.h>
 
 AgvStatus agv;
 static unsigned run_mode, dock_step;
-static uint8_t moving, anchored;
+static uint8_t moving, anchored, direct, heading_bad;
 static uint16_t path_index;
-static uint32_t since, move_since, version;
+static uint32_t since, move_since, version, heading_bad_since;
 static float origin_x, origin_y, origin_yaw, cs, sn;
-static MapPoint home, gateway, cursor, target, segment_start;
-
-/* 把角度归一化到 [-180, 180) 区间。 */
-static float Wrap(float a)
-{
-    a = fmodf(a + 180.0f, 360.0f);
-    if (a < 0)
-        a += 360;
-    return a - 180;
-}
+static MapPoint home, gateway, cursor, target, segment_start, leg_a, leg_b;
 
 /* 进入故障态：立即停车并记录错误码。 */
 static void Fail(AgvError error)
@@ -44,7 +36,7 @@ void Agv_Init(unsigned mode, unsigned zone)
 {
     run_mode = mode;
     agv = (AgvStatus){0};
-    moving = anchored = 0;
+    moving = anchored = direct = heading_bad = 0;
     since = HAL_GetTick();
     dock_step = 0;
     path_index = 0;
@@ -86,9 +78,9 @@ static uint8_t BeginMove(MapPoint p, float margin)
         cursor = p;
         return 1;
     }
-    float angle = Wrap(chassis.yaw - origin_yaw) * 0.01745329252f;
-    HAL_StatusTypeDef result = Chassis_MoveDistance(cosf(angle) * dx + sinf(angle) * dy,
-                                                    -sinf(angle) * dx + cosf(angle) * dy);
+    float angle = Math_WrapDeg(chassis.yaw - origin_yaw) * MATH_DEG_TO_RAD;
+    HAL_StatusTypeDef result = Chassis_MoveDistanceHold(
+        cosf(angle) * dx + sinf(angle) * dy, -sinf(angle) * dx + cosf(angle) * dy, origin_yaw);
     if (result == HAL_BUSY)
         return 0;
     if (result != HAL_OK)
@@ -96,7 +88,6 @@ static uint8_t BeginMove(MapPoint p, float margin)
         Fail(AGV_ERR_CHASSIS);
         return 0;
     }
-    chassis.heading_target = origin_yaw;
     target = p;
     segment_start = cursor;
     moving = 1;
@@ -104,30 +95,64 @@ static uint8_t BeginMove(MapPoint p, float margin)
     return 1;
 }
 
-/* 为当前这一小段做 A* 规划，并把搜索限制在本段走廊内。 */
+/* 当前段的路径长度：直线段只有起终两点，否则取 A* 结果。 */
+static uint16_t PathLength(void)
+{
+    return direct ? 2U : AStar_PathLength();
+}
+
+static uint8_t PathPoint(uint16_t index, MapPoint *p)
+{
+    if (direct)
+    {
+        if (index > 1U)
+            return 0;
+        *p = index ? leg_b : leg_a;
+        return 1;
+    }
+    MapCell cell;
+    return AStar_PathCell(index, &cell) && Map_GridToWorld(cell.row, cell.col, p);
+}
+
+static int Sign(int32_t v)
+{
+    return (v > 0) - (v < 0);
+}
+
+static uint16_t ClampCell(int value, uint16_t limit)
+{
+    return (uint16_t)(value < 0 ? 0 : (value >= (int)limit ? (int)limit - 1 : value));
+}
+
+/* 规划当前段：通道直线无碰撞时直接走直线；否则在本段走廊内做 A*，防止抄近路漏覆盖。 */
 static void PlanLeg(void)
 {
-    MapPoint a, b;
     unsigned edge;
-    if (!Survey_Leg(agv.leg, &a, &b, &edge))
+    if (!Survey_Leg(agv.leg, &leg_a, &leg_b, &edge))
     {
         agv.state = AGV_DOCK_IN;
         dock_step = 0;
         return;
     }
+    path_index = 0;
+    direct = Map_CanSegment(leg_a, leg_b, MAP_MARGIN_MM);
+    if (direct)
+    {
+        agv.state = AGV_DRIVE;
+        return;
+    }
     MapCell s, g;
-    Map_WorldToGrid(a.x, a.y, &s.row, &s.col);
-    Map_WorldToGrid(b.x, b.y, &g.row, &g.col);
-    /* Restrict to this edge's corridor, preventing coverage shortcuts. */
-    int r0 = (s.row < g.row ? s.row : g.row) - 15, c0 = (s.col < g.col ? s.col : g.col) - 15;
-    int r1 = (s.row > g.row ? s.row : g.row) + 15, c1 = (s.col > g.col ? s.col : g.col) + 15;
-    if (!AStar_Begin(s, g, (uint16_t)r0, (uint16_t)c0, (uint16_t)r1, (uint16_t)c1))
+    Map_WorldToGrid(leg_a.x, leg_a.y, &s.row, &s.col);
+    Map_WorldToGrid(leg_b.x, leg_b.y, &g.row, &g.col);
+    const int w = (int)AGV_CORRIDOR_CELLS;
+    uint16_t r0 = ClampCell((s.row < g.row ? s.row : g.row) - w, MAP_ROWS);
+    uint16_t c0 = ClampCell((s.col < g.col ? s.col : g.col) - w, MAP_COLS);
+    uint16_t r1 = ClampCell((s.row > g.row ? s.row : g.row) + w, MAP_ROWS);
+    uint16_t c1 = ClampCell((s.col > g.col ? s.col : g.col) + w, MAP_COLS);
+    if (!AStar_Begin(s, g, r0, c0, r1, c1))
         Fail(AGV_ERR_PATH);
     else
-    {
-        path_index = 0;
         agv.state = AGV_PLAN;
-    }
 }
 
 /* 巡检主状态机：等就绪、出库、规划、行驶、入库，每拍推进一步。 */
@@ -155,8 +180,8 @@ void Agv_Tick(void)
         origin_x = chassis.pos_x;
         origin_y = chassis.pos_y;
         origin_yaw = chassis.yaw;
-        cs = cosf(origin_yaw * 0.01745329252f);
-        sn = sinf(origin_yaw * 0.01745329252f);
+        cs = cosf(origin_yaw * MATH_DEG_TO_RAD);
+        sn = sinf(origin_yaw * MATH_DEG_TO_RAD);
         cursor = home;
         version = Map_Revision();
         anchored = 1;
@@ -173,9 +198,21 @@ void Agv_Tick(void)
     }
     float pose_margin =
         (agv.state == AGV_DOCK_OUT || agv.state == AGV_DOCK_IN) ? 0.0f : MAP_MARGIN_MM;
+    float heading = Math_WrapDeg(chassis.yaw - origin_yaw);
     if (!isfinite(agv.x) || !isfinite(agv.y) || !isfinite(chassis.yaw) ||
-        fabsf(Wrap(chassis.yaw - origin_yaw)) > AGV_HEADING_TOL_DEG ||
-        !Map_CanPoseHeading(agv.x, agv.y, Wrap(chassis.yaw - origin_yaw), pose_margin))
+        !Map_CanPoseHeading(agv.x, agv.y, heading, pose_margin))
+    {
+        Fail(AGV_ERR_POSE);
+        return;
+    }
+    if (fabsf(heading) <= AGV_HEADING_FAULT_DEG)
+        heading_bad = 0;
+    else if (!heading_bad)
+    {
+        heading_bad = 1;
+        heading_bad_since = now;
+    }
+    else if (now - heading_bad_since > AGV_HEADING_FAULT_MS)
     {
         Fail(AGV_ERR_POSE);
         return;
@@ -240,7 +277,8 @@ void Agv_Tick(void)
     }
     if (agv.state == AGV_DRIVE)
     {
-        if (path_index + 1U >= AStar_PathLength())
+        uint16_t length = PathLength();
+        if (path_index + 1U >= length)
         {
             MapPoint a, b;
             unsigned edge;
@@ -254,28 +292,24 @@ void Agv_Tick(void)
             PlanLeg();
             return;
         }
-        MapCell a, b;
-        AStar_PathCell(path_index, &a);
+        MapPoint a, b;
         uint16_t next = path_index + 1U;
-        if (!AStar_PathCell(next, &b))
+        if (!PathPoint(path_index, &a) || !PathPoint(next, &b))
         {
             Fail(AGV_ERR_PATH);
             return;
         }
-        int dr = (int)b.row - a.row, dc = (int)b.col - a.col;
-        /* Coalesce straight grid steps, bounded work per tick. */
-        for (unsigned n = 0; n < 100 && next + 1U < AStar_PathLength(); ++n)
+        int sx = Sign(b.x - a.x), sy = Sign(b.y - a.y);
+        /* 合并同方向的连续栅格步，每拍工作量有上限。 */
+        for (unsigned n = 0; n < 100U && next + 1U < length; ++n)
         {
-            MapCell c;
-            AStar_PathCell(next + 1U, &c);
-            if ((int)c.row - b.row != dr || (int)c.col - b.col != dc)
+            MapPoint c;
+            if (!PathPoint(next + 1U, &c) || Sign(c.x - b.x) != sx || Sign(c.y - b.y) != sy)
                 break;
             b = c;
             ++next;
         }
-        MapPoint p;
-        Map_GridToWorld(b.row, b.col, &p);
-        if (BeginMove(p, MAP_MARGIN_MM))
+        if (BeginMove(b, MAP_MARGIN_MM))
             path_index = next;
     }
 }

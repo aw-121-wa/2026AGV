@@ -1,4 +1,4 @@
-﻿#include "chassis_cmd.h"
+#include "chassis_cmd.h"
 #include "chassis.h"
 #include "chassis_telemetry.h"
 #include "agv_config.h"

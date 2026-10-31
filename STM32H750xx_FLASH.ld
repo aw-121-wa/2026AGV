@@ -230,12 +230,14 @@ SECTIONS
   PROVIDE( __bss_start = __tbss_start );
   PROVIDE( __bss_size = __bss_end - __bss_start );
 
-  /* DMA1 cannot access DTCM. HWT101 configures this aligned region non-cacheable. */
+  /* DMA1 cannot access DTCM. MPU_Config region1 (0x30000000, 256 B) makes it non-cacheable. */
   .imu_dma (NOLOAD) : ALIGN(256)
   {
     *(.imu_dma)
     . = ALIGN(256);
   } >RAM_D2
+  ASSERT(ADDR(.imu_dma) == 0x30000000 && SIZEOF(.imu_dma) <= 256,
+         ".imu_dma must stay inside MPU region1")
 
   /* User_heap_stack section, used to check that there is enough RAM left */
   /* Planner buffers: explicitly initialized by Map_Init/AStar_Begin. */
