@@ -1,4 +1,5 @@
 #include "main.h"
+#include "critical.h"
 #include "chassis.h"
 #include "hwt101.h"
 #include "user_math.h"
@@ -86,10 +87,9 @@ static uint8_t s_odom_valid;
 /* 判断陀螺仪与四轮反馈是否新鲜：全部有效且未超时才返回 1。 */
 static uint8_t Chassis_FeedbackReady(void)
 {
-    uint32_t irq = __get_PRIMASK();
-    __disable_irq();
+    critical_state irq = Critical_Enter();
     imu_data sample = imu;
-    __set_PRIMASK(irq);
+    Critical_Exit(irq);
     uint32_t now = HAL_GetTick();
     if (!sample.valid || !isfinite(sample.yaw) ||
         (now - sample.updated_ms > CHASSIS_FEEDBACK_TIMEOUT_MS))
@@ -229,10 +229,9 @@ static void Chassis_RequestFeedback(void)
 /* 独立采集新鲜 IMU 航向，轮子反馈失效仍由上层故障保护处理。 */
 static void Chassis_UpdateYaw(void)
 {
-    uint32_t irq = __get_PRIMASK();
-    __disable_irq();
+    critical_state irq = Critical_Enter();
     imu_data sample = imu;
-    __set_PRIMASK(irq);
+    Critical_Exit(irq);
     if (sample.valid && isfinite(sample.yaw) &&
         HAL_GetTick() - sample.updated_ms <= CHASSIS_FEEDBACK_TIMEOUT_MS)
         chassis.yaw = Math_WrapDeg(CHASSIS_YAW_SIGN * sample.yaw);
@@ -427,12 +426,11 @@ void Chassis_Update(void)
         Chassis_Apply();
         return;
     }
-    uint32_t irq = __get_PRIMASK();
-    __disable_irq();
+    critical_state irq = Critical_Enter();
     uint8_t pending = s_move_req;
     float forward = s_move_forward, left = s_move_left;
     s_move_req = 0U;
-    __set_PRIMASK(irq);
+    Critical_Exit(irq);
     if (pending)
         (void)Chassis_MoveDistance(forward, left);
     if (chassis.mode != CHASSIS_MODE_VEL)
@@ -560,13 +558,12 @@ HAL_StatusTypeDef Chassis_TurnBy(float degrees)
 /* 中断安全的单槽请求：只登记一次移动目标，由主循环取走执行。 */
 void Chassis_MoveRequest(float forward_mm, float left_mm)
 {
-    uint32_t irq = __get_PRIMASK();
-    __disable_irq();
+    critical_state irq = Critical_Enter();
     if (!s_move_req)
     {
         s_move_forward = forward_mm;
         s_move_left = left_mm;
         s_move_req = 1U;
     }
-    __set_PRIMASK(irq);
+    Critical_Exit(irq);
 }

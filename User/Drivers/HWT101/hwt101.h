@@ -17,7 +17,9 @@ extern imu_data imu;
 // 调度前调用一次；UART RX DMA 必须已配置为循环模式。
 // DMA 缓冲区的非缓存属性由 main.c MPU_Config 的 region1 提供（见 2026AGV.ioc）。
 HAL_StatusTypeDef HWT101_Init(UART_HandleTypeDef *huart);
-// 只在一个任务中周期调用，data 不可为空。
+// 收到新数据、溢出或串口错误时在中断里调用 hook，用来唤醒 IMU 任务；hook 必须 ISR 安全。
+void HWT101_SetRxHook(void (*hook)(void));
+// 只在一个任务中调用（被 hook 唤醒或超时），data 不可为空。
 void HWT101_ProcessData(UART_HandleTypeDef *huart, imu_data *data);
 
 // 由统一 UART 回调分发，其他 UART 自动忽略。

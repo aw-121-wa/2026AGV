@@ -1,4 +1,5 @@
 #include "chassis_cmd.h"
+#include "critical.h"
 #include "chassis.h"
 #include "chassis_telemetry.h"
 #include "agv_config.h"
@@ -170,11 +171,10 @@ void ChassisCmd_Poll(void)
 {
     if (overflow)
     {
-        uint32_t irq = __get_PRIMASK();
-        __disable_irq();
+        critical_state irq = Critical_Enter();
         tail = head;
         overflow = 0U;
-        __set_PRIMASK(irq);
+        Critical_Exit(irq);
         Reset();
 #if AGV_MODE != AGV_MODE_COMMAND
         Agv_Stop();

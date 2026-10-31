@@ -17,8 +17,6 @@ User/
 tests/
   host/        PC 端单元测试与 HAL 假实现
   run_tests.py 一键构建并运行全部 host 测试
-  dashboard_test.cjs  地面站规划逻辑测试（需要 node）
-tools/dashboard/      地面站网页与串口桥
 ```
 
 依赖方向：App → Navigation/Chassis → Drivers；Comm 依赖 Chassis 与 App；Drivers 不依赖上层。
@@ -43,6 +41,15 @@ cmake --build build/Release
 ```bash
 python3 tests/run_tests.py
 ```
+
+## RTOS
+
+| 任务 | 优先级 | 栈 | 说明 |
+|---|---|---|---|
+| IMUTask | High | 1 KB | UART5 中断通过线程标志唤醒，10 ms 超时兜底检查 DMA 重启 |
+| ChassisTask | AboveNormal | 2 KB | 5 ms 周期：底盘闭环 → 串口指令/遥测 → 巡检状态机 |
+
+`configCHECK_FOR_STACK_OVERFLOW = 2`，溢出时 `vApplicationStackOverflowHook` 先给四个电机发停止再停机，任务名存在 `stack_overflow_task`。共享数据用 `User/Common/critical.h`（FreeRTOS BASEPRI 临界区）保护。
 
 ## 硬件约定
 

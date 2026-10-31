@@ -1,4 +1,5 @@
 #include "hwt101.h"
+#include "critical.h"
 #include <string.h>
 
 #define DMA_SIZE   256U
@@ -18,19 +19,32 @@ static volatile uint16_t rx_head; // 中断写入位置
 static volatile uint16_t rx_tail; // 任务读取位置
 static uint8_t frame[FRAME_SIZE];
 static uint8_t frame_index;
-static volatile uint8_t rx_gap;     // 队列溢出，需要重新同步帧头
-static volatile uint8_t restart_rx; // 接收异常，需要在任务中重启 DMA
+static volatile uint8_t rx_gap;        // 队列溢出，需要重新同步帧头
+static volatile uint8_t restart_rx;    // 接收异常，需要在任务中重启 DMA
+static void (*volatile rx_hook)(void); // 中断里通知 IMU 任务
+
+static void HWT101_Notify(void)
+{
+    void (*hook)(void) = rx_hook;
+    if (hook)
+        hook();
+}
+
+/* 注册接收通知回调（在中断里调用，只能做 ISR 安全操作，如 osThreadFlagsSet）。 */
+void HWT101_SetRxHook(void (*hook)(void))
+{
+    rx_hook = hook;
+}
 
 /* 初始化和错误恢复共用：清空旧数据，启动循环接收。 */
 static HAL_StatusTypeDef HWT101_StartRx(void)
 {
-    uint32_t irq = __get_PRIMASK();
-    __disable_irq();
+    critical_state irq = Critical_Enter();
     rx_head = rx_tail = dma_pos = 0U;
     frame_index = rx_gap = restart_rx = 0U;
     HAL_StatusTypeDef status = HAL_UARTEx_ReceiveToIdle_DMA(imu_uart, dma_buf, DMA_SIZE);
     restart_rx = (status != HAL_OK);
-    __set_PRIMASK(irq);
+    Critical_Exit(irq);
     return status;
 }
 
@@ -95,6 +109,7 @@ void HWT101_RxEvent(UART_HandleTypeDef *huart, uint16_t size)
     {
         rx_gap = 1U;
         dma_pos = pos;
+        HWT101_Notify();
         return;
     }
     uint16_t head = rx_head;
@@ -108,6 +123,7 @@ void HWT101_RxEvent(UART_HandleTypeDef *huart, uint16_t size)
     }
     __DMB();
     rx_head = head;
+    HWT101_Notify();
 }
 
 /* 串口错误中断：只标记需要重启并作废数据，重启动作留给任务。 */
@@ -118,6 +134,7 @@ void HWT101_RxError(UART_HandleTypeDef *huart)
         // 中断只标记错误，重启操作交给 IMU 任务。
         restart_rx = 1U;
         imu.valid = 0U;
+        HWT101_Notify();
     }
 }
 
@@ -148,15 +165,14 @@ static void HWT101_ParseByte(uint8_t byte, uint32_t received_ms, imu_data *data)
     if (frame[1] != 0x53)
         return;
     int16_t raw_yaw = (int16_t)(((uint16_t)frame[7] << 8) | frame[6]);
-    uint32_t irq = __get_PRIMASK();
-    __disable_irq();
+    critical_state irq = Critical_Enter();
     if (!restart_rx && !rx_gap)
     {
         data->yaw = raw_yaw * (180.0f / 32768.0f);
         data->updated_ms = received_ms; // 使用帧尾的接收时间，不使用解析时间
         data->valid = 1U;
     }
-    __set_PRIMASK(irq);
+    Critical_Exit(irq);
 }
 
 /* 任务侧主入口：先处理错误重启与队列溢出，再逐字节出队组帧，最多消费一圈。 */
@@ -175,11 +191,10 @@ void HWT101_ProcessData(UART_HandleTypeDef *huart, imu_data *data)
     }
     if (rx_gap)
     {
-        uint32_t irq = __get_PRIMASK();
-        __disable_irq();
+        critical_state irq = Critical_Enter();
         rx_tail = rx_head; // 丢弃断流前的数据，重新寻找帧头
         rx_gap = 0U;
-        __set_PRIMASK(irq);
+        Critical_Exit(irq);
         frame_index = 0U;
         data->valid = 0U;
     }

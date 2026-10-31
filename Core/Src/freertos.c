@@ -26,7 +26,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdio.h>
 #include "hwt101.h"
 #include "zdt_x42s.h"
 #include "chassis.h"
@@ -51,20 +50,16 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
+#define IMU_RX_FLAG      0x0001U
+#define IMU_WAIT_TIMEOUT 10U /* ms，兜底：串口停流时也定期检查 DMA 重启 */
+volatile const char *stack_overflow_task; /* 调试器查看溢出的任务名 */
 
 /* USER CODE END Variables */
-/* Definitions for StartTask */
-osThreadId_t StartTaskHandle;
-const osThreadAttr_t StartTask_attributes = {
-  .name = "StartTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
 /* Definitions for IMUTask */
 osThreadId_t IMUTaskHandle;
 const osThreadAttr_t IMUTask_attributes = {
   .name = "IMUTask",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for ChassisTask */
@@ -77,14 +72,32 @@ const osThreadAttr_t ChassisTask_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
+static void IMU_RxNotify(void);
 
 /* USER CODE END FunctionPrototypes */
 
-void StartTask01(void *argument);
 void StartIMUTask(void *argument);
 void StartChassisTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
+
+/* Hook prototypes */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName);
+
+/* USER CODE BEGIN 4 */
+/* 栈溢出：尽力让四个电机立即停止（FDCAN 由硬件发送，不依赖 RTOS），然后停机等调试。 */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+  (void)xTask;
+  taskDISABLE_INTERRUPTS();
+  stack_overflow_task = pcTaskName;
+  for (uint8_t address = ZDT_ADDR_LF; address <= ZDT_ADDR_RR; ++address)
+    (void)ZDT_Stop(ZDT_FindMotor(address), ZDT_SYNC_NOW);
+  for (;;)
+  {
+  }
+}
+/* USER CODE END 4 */
 
 /**
   * @brief  FreeRTOS initialization
@@ -113,9 +126,6 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of StartTask */
-  StartTaskHandle = osThreadNew(StartTask01, NULL, &StartTask_attributes);
-
   /* creation of IMUTask */
   IMUTaskHandle = osThreadNew(StartIMUTask, NULL, &IMUTask_attributes);
 
@@ -132,24 +142,6 @@ void MX_FREERTOS_Init(void) {
 
 }
 
-/* USER CODE BEGIN Header_StartTask01 */
-/**
-  * @brief  Function implementing the StartTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartTask01 */
-void StartTask01(void *argument)
-{
-  /* USER CODE BEGIN StartTask01 */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END StartTask01 */
-}
-
 /* USER CODE BEGIN Header_StartIMUTask */
 /**
 * @brief Function implementing the IMUTask thread.
@@ -160,11 +152,14 @@ void StartTask01(void *argument)
 void StartIMUTask(void *argument)
 {
   /* USER CODE BEGIN StartIMUTask */
+  (void)argument;
+  HWT101_SetRxHook(IMU_RxNotify);
   /* Infinite loop */
   for(;;)
   {
+    /* 串口中断收到数据后才唤醒，不再 1 ms 空转轮询。 */
+    (void)osThreadFlagsWait(IMU_RX_FLAG, osFlagsWaitAny, IMU_WAIT_TIMEOUT);
     HWT101_ProcessData(&huart5, &imu);
-    osDelay(1);
   }
   /* USER CODE END StartIMUTask */
 }
@@ -179,6 +174,7 @@ void StartIMUTask(void *argument)
 void StartChassisTask(void *argument)
 {
   /* USER CODE BEGIN StartChassisTask */
+  (void)argument;
   const uint32_t period = (osKernelGetTickFreq() * CHASSIS_PERIOD_US) / 1000000U;
   uint32_t next_tick = osKernelGetTickCount();
   for (;;) {
@@ -195,6 +191,10 @@ void StartChassisTask(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+static void IMU_RxNotify(void)
+{
+  (void)osThreadFlagsSet(IMUTaskHandle, IMU_RX_FLAG);
+}
 
 /* USER CODE END Application */
 
