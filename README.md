@@ -46,6 +46,7 @@ python3 tests/run_tests.py
 
 ## 硬件约定
 
-- ZDT_X42S 使用 **X 固件**，CAN 500 kbps（驱动器出厂默认），校验字节固定 0x6B。速度 0.1 RPM、位置 0.1° 精度。
+- ZDT_X42S 使用 **X 固件**，校验字节固定 0x6B，速度 0.1 RPM、位置 0.1° 精度。
+- FDCAN2 为 **1 Mbps**（120 MHz 内核时钟，Prescaler 6，Seg1 15，Seg2 4，SJW 4，采样点 80%）。驱动器出厂是 500K，**每台都要在菜单里把 `CAN_Baud` 改成 1M**（手册选项 09），否则无法通信；总线两端各接 120Ω 终端电阻。
 - 四轮速度命令带同步标志缓存，再广播 `00 FF 66 6B` 同时执行；广播只有地址 1 应答。
 - D-Cache/I-Cache 已开启。HWT101 DMA 缓冲区固定在 RAM_D2 起始 256 B，由 `MPU_Config` region1 设为非缓存（配置已写入 `2026AGV.ioc`，重新生成代码会保留）。
