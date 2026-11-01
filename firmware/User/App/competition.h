@@ -1,0 +1,48 @@
+#ifndef COMPETITION_H
+#define COMPETITION_H
+
+#include "agv_config.h"
+#include "lidar_obstacle.h"
+#include "vision_link.h"
+#include <stdint.h>
+
+/* 比赛模式（AGV_MODE_COMPETITION）运行框架：
+   - USART1 驱动 RPLIDAR C1，实时识别黑色障碍物并写入栅格地图；
+   - USART2 与视觉上位机通信：下发位姿 / 视觉模式 / 障碍物，接收任务码、物料和圆环偏差；
+   - 维护场地坐标位姿（与跑图模式相同约定：上电时车头朝场地 +X，原点为出发区中心）。
+   只在比赛模式下由 main.c / freertos.c 调用；另外两个模式完全不涉及。
+   后续比赛流程（取料 / 放料状态机）直接读 comp、vision、地图，并用 Comp_SetVisionMode 切换视觉任务。 */
+
+typedef enum
+{
+    COMP_LIDAR_BOOT = 0, // 上电等待
+    COMP_LIDAR_STOPPING, // 已发 STOP，等雷达停流
+    COMP_LIDAR_START,    // 已发 SCAN，等应答
+    COMP_LIDAR_RUN,      // 正在出点
+} CompLidarState;
+
+typedef struct
+{
+    uint8_t anchored;        // 位姿基准已建立（底盘 READY 后）
+    float x, y, heading_deg; // 车体中心场地坐标 mm，航向 deg（相对场地 +X，逆时针正）
+    CompLidarState lidar_state;
+    uint32_t lidar_restarts;
+    float lidar_hz;          // 实测扫描频率
+    uint8_t obstacles;       // 已确认并写入地图的障碍物数
+    uint8_t vision_online;
+    VisionMode vision_mode;
+    uint8_t vision_color;
+} CompStatus;
+
+extern CompStatus comp;
+
+/* 调度器启动前调用：建图、初始化两路串口。 */
+HAL_StatusTypeDef Comp_Init(unsigned zone);
+
+/* 底盘任务每周期（5 ms）调用一次。 */
+void Comp_Tick(void);
+
+/* 切换视觉任务，立即下发给上位机。color 为 VisionColor，0 = 任意。 */
+void Comp_SetVisionMode(VisionMode mode, uint8_t color);
+
+#endif

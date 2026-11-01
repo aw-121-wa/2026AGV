@@ -1,0 +1,19 @@
+#ifndef __CHASSIS_CMD_H
+#define __CHASSIS_CMD_H
+
+#include "usart.h"
+
+// 绑定命令串口（本工程用 USART6），在串口初始化之后、调度器启动之前调用一次。
+// 命令格式：F1000/B1000/L1000/R1000(mm)，A90(绝对角)，T-90(相对角)，S(停车)。
+// A/T 支持最多三位小数，如 A0.125；毫米距离仍使用整数。
+// 多条命令以空格或换行分隔；兼容一帧一条且无换行。运动中新命令排队追加到当前路径，
+// 整行校验通过才提交（错误行不会执行半条路径）；S 立即停车并丢弃本行剩余内容。
+HAL_StatusTypeDef ChassisCmd_Init(UART_HandleTypeDef *huart);
+// 最近命令结果，供调试器观察；BUSY 表示尚未就绪或正在运动。
+extern HAL_StatusTypeDef chassis_cmd_status;
+void ChassisCmd_RxEvent(UART_HandleTypeDef *huart, uint16_t size);
+
+// 在底盘任务里每周期调用，用于接收出错后重新开启接收。
+void ChassisCmd_Poll(void);
+
+#endif

@@ -1,0 +1,4 @@
+opencv-python>=4.8
+numpy
+pyserial
+# rplidar-roboticia  # 仅 LIDAR_TYPE="rplidar" 时需要
