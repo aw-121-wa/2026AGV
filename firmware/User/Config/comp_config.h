@@ -48,4 +48,10 @@
 #define COMP_MODE_PERIOD_MS    200U // 重复下发视觉模式（上位机重启后能自动同步）
 #define COMP_REPORT_PERIOD_MS  1000U // USART6 文本状态行周期
 
+/* ---------------- 二维码扫码模块 ----------------
+   USART3：PB10 = MCU TX → 模块 RX，PB11 = MCU RX ← 模块 TX；8N1，3.3V 电平。
+   模块要设成连续或感应读码（固件不发触发命令），并关掉补光灯：规则只允许垂直向下补光。 */
+#define COMP_SCANNER_BAUD    9600U // 常见模块的出厂值，以模块手册为准
+#define COMP_SCANNER_IDLE_MS 30U   // 模块没有行尾符时，超过此时间没有新字节就算一行结束
+
 #endif

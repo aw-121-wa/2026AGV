@@ -8,6 +8,7 @@
 #include "ser_port.h"
 #include "user_math.h"
 #include <math.h>
+#include <string.h>
 
 CompStatus comp;
 
@@ -17,6 +18,9 @@ static uint32_t boot_ms, lidar_cmd_ms, lidar_last_sample_ms, hz_ms, hz_scans;
 static uint32_t pose_ms, mode_ms, report_ms;
 static uint8_t obstacles_dirty;
 static RPLidarParser parser;
+static TaskLine scan_line;
+static uint32_t camera_task_ms;
+static char last_rejected[VL_MAX_PAYLOAD + 1U];
 
 HAL_StatusTypeDef Comp_Init(unsigned zone)
 {
@@ -27,9 +31,13 @@ HAL_StatusTypeDef Comp_Init(unsigned zone)
     LidarObs_Init();
     VisionLink_Init();
     RPLidar_Reset(&parser);
-    boot_ms = HAL_GetTick();
+    scan_line = (TaskLine){0};
+    camera_task_ms = 0;
+    last_rejected[0] = '\0';
+    boot_ms = report_ms = HAL_GetTick();
     if (SerPort_Init(SER_LIDAR, COMP_LIDAR_BAUD) != HAL_OK ||
-        SerPort_Init(SER_VISION, COMP_VISION_BAUD) != HAL_OK)
+        SerPort_Init(SER_VISION, COMP_VISION_BAUD) != HAL_OK ||
+        SerPort_Init(SER_SCANNER, COMP_SCANNER_BAUD) != HAL_OK)
         return HAL_ERROR;
     return HAL_OK;
 }
@@ -141,6 +149,51 @@ void Comp_SetVisionMode(VisionMode mode, uint8_t color)
     mode_ms = HAL_GetTick();
 }
 
+/* 扫码模块和相机读到的文本都走这里。合法的码留在 comp.task；
+   不合法的打印原文，现场能看到读到了什么。 */
+static void AcceptTask(const char *text, unsigned len, const char *source)
+{
+    static const char *const reason[] = {"", "format", "color", "ring", "batch"};
+    TaskCode code;
+    TaskCodeResult result = TaskCode_Parse(text, len, &code);
+    if (result != TASK_CODE_OK)
+    {
+        ++comp.task_rejected;
+        if (strcmp(text, last_rejected) != 0) // 连续读码时同样的内容只打印一次
+        {
+            memcpy(last_rejected, text, len + 1U);
+            ChassisTelemetry_Printf("COMP task rejected (%s) from %s: %s\r\n", reason[result],
+                                    source, text);
+        }
+        return;
+    }
+    if (comp.task_valid && strcmp(code.text, comp.task.text) == 0)
+        return;
+    comp.task = code;
+    comp.task_valid = 1;
+    ChassisTelemetry_Printf("COMP task %s from %s, batch 2 storage rings %u %u %u\r\n", code.text,
+                            source, (unsigned)code.storage_ring[1][0],
+                            (unsigned)code.storage_ring[1][1], (unsigned)code.storage_ring[1][2]);
+}
+
+static void ScannerTick(uint32_t now)
+{
+    uint8_t buf[64];
+    unsigned n;
+    while ((n = SerPort_Read(SER_SCANNER, buf, sizeof(buf))) > 0U)
+        for (unsigned i = 0; i < n; ++i)
+            if (TaskLine_Feed(&scan_line, buf[i], now))
+            {
+                AcceptTask(scan_line.text, scan_line.len, "scanner");
+                scan_line.len = 0;
+            }
+    if (TaskLine_Idle(&scan_line, now, COMP_SCANNER_IDLE_MS))
+    {
+        AcceptTask(scan_line.text, scan_line.len, "scanner");
+        scan_line.len = 0;
+    }
+}
+
 static void VisionTick(uint32_t now)
 {
     uint8_t buf[128], f[VL_FRAME_MAX];
@@ -148,6 +201,11 @@ static void VisionTick(uint32_t now)
     while ((n = SerPort_Read(SER_VISION, buf, sizeof(buf))) > 0U)
         for (unsigned i = 0; i < n; ++i)
             (void)VisionLink_Feed(buf[i], now);
+    if (vision.task_ms != camera_task_ms)
+    {
+        camera_task_ms = vision.task_ms;
+        AcceptTask(vision.task_text, vision.task_len, "camera");
+    }
     uint8_t online = VisionLink_Online(now, COMP_VISION_TIMEOUT_MS);
     if (online != comp.vision_online)
     {
@@ -211,17 +269,21 @@ static void Report(uint32_t now)
         return;
     report_ms = now;
     static const char *const lidar_text[] = {"BOOT", "STOP", "START", "RUN"};
+    const SerPortStats *scan = SerPort_Stats(SER_SCANNER);
     ChassisTelemetry_Printf(
         "COMP pose=(%ld,%ld,%s) lidar=%s %sHz pts=%lu used=%lu clu=%lu "
-        "obs=%u rs=%lu/%lu | vision=%s mode=%u task=%u mat=%u ring=%u%s crc=%lu\r\n",
+        "obs=%u rs=%lu/%lu | vision=%s mode=%u mat=%u ring=%u%s crc=%lu | "
+        "task=%s rej=%lu scan=%lu/%lu\r\n",
         (long)lroundf(comp.x), (long)lroundf(comp.y), Fix1(yaw, comp.heading_deg),
         lidar_text[comp.lidar_state], Fix1(hz, comp.lidar_hz),
         (unsigned long)lidar_obs.points, (unsigned long)lidar_obs.used,
         (unsigned long)lidar_obs.clusters, (unsigned)comp.obstacles,
         (unsigned long)comp.lidar_restarts, (unsigned long)parser.resync,
-        comp.vision_online ? "ON" : "OFF", (unsigned)comp.vision_mode, (unsigned)vision.task_len,
+        comp.vision_online ? "ON" : "OFF", (unsigned)comp.vision_mode,
         (unsigned)vision.material_count, (unsigned)vision.ring_found,
-        vision.ring_aligned ? "(aligned)" : "", (unsigned long)vision.crc_errors);
+        vision.ring_aligned ? "(aligned)" : "", (unsigned long)vision.crc_errors,
+        comp.task_valid ? comp.task.text : "none", (unsigned long)comp.task_rejected,
+        (unsigned long)scan->rx_bytes, (unsigned long)scan->hw_errors);
 }
 
 void Comp_Tick(void)
@@ -230,6 +292,7 @@ void Comp_Tick(void)
     UpdatePose(now);
     LidarTick(now);
     VisionTick(now);
+    ScannerTick(now);
     Report(now);
 }
 #endif

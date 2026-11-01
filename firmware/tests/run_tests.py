@@ -6,11 +6,13 @@ Set AGV_HOST_BUILD to build the binaries somewhere else (e.g. a writable temp di
 import os
 from pathlib import Path
 import subprocess
+import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT =Path(__file__).resolve().parents[1]
 BUILD = Path(os.environ.get('AGV_HOST_BUILD') or ROOT / 'build' / 'host')
 INCLUDES = ['tests/host', 'User/Config', 'User/Common', 'User/Drivers/HWT101',
-            'User/Drivers/ZDT_X42S', 'User/Chassis', 'User/Comm', 'User/Navigation', 'User/App']
+            'User/Drivers/ZDT_X42S', 'User/Drivers/RPLidar', 'User/Drivers/SerPort', 'User/Chassis',
+            'User/Comm', 'User/Navigation', 'User/App']
 CFLAGS = ['gcc', '-std=c11', '-Wall', '-Wextra', '-Werror'] + ['-I' + i for i in INCLUDES]
 NAV = ['User/Navigation/map.c', 'User/Navigation/astar.c', 'User/Navigation/survey.c']
 
@@ -24,6 +26,9 @@ SUITES = {
     'planner_test': NAV[:2],
     'survey_test': ['User/Navigation/survey.c'],
     'agv_test': NAV + ['User/App/agv_run.c'],
+    'task_test': ['User/App/task_code.c'],
+    'comp_test': ['User/Navigation/map.c', 'User/Navigation/lidar_obstacle.c',
+                  'User/Drivers/RPLidar/rplidar.c', 'User/Comm/vision_link.c'],
 }
 
 
@@ -42,6 +47,12 @@ def main():
     run('bench_test@noimu', [], ['-DCHASSIS_USE_IMU=0'])
     for mode in range(3):
         run('mode_test@' + str(mode), [], ['-DAGV_MODE=' + str(mode)])
+    run('comp_task_test', ['User/App/competition.c', 'User/App/task_code.c',
+                           'User/Navigation/map.c', 'User/Navigation/lidar_obstacle.c',
+                           'User/Drivers/RPLidar/rplidar.c', 'User/Comm/vision_link.c'],
+        ['-DAGV_MODE=2'])
+    subprocess.run([sys.executable, 'tests/vision_protocol_test.py'], cwd=ROOT, check=True,
+                   timeout=60)
     print('ALL HOST TESTS PASSED')
 
 

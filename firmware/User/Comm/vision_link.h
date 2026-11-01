@@ -13,7 +13,7 @@
  *
  * 上位机 → STM32
  *   0x01 HEARTBEAT  state u8 (0 正常 / 1 相机故障), fps u8                       ≥ 5 Hz
- *   0x02 TASK       n u8 (≤6), color[n] u8                    二维码任务码，按搬运顺序
+ *   0x02 TASK       text[LEN] ASCII                     相机读到的二维码原文，单片机解析校验
  *   0x03 MATERIALS  n u8 (≤6), n × {color u8, fwd i16, left i16}
  *   0x04 RING       found u8, aligned u8, fwd i16, left i16
  *     fwd/left：目标相对“夹爪放置点”的偏差，车体坐标（前 / 左为正），单位 0.1 mm。
@@ -24,7 +24,7 @@
  *   0x82 MODE       mode u8 (0 关 / 1 二维码 / 2 物料 / 3 圆环), color u8 (0 = 任意)  5 Hz
  *   0x83 OBSTACLES  n u8 (≤16), n × {x i16 mm, y i16 mm}           雷达确认的障碍物，变化时发
  *
- * 颜色编号：1 红 2 黄 3 绿 4 浅蓝 5 蓝 6 黑。 */
+ * 颜色编号（比赛规则的任务码编号）：1 红 2 黄 3 蓝 4 绿 5 黑 6 浅蓝。 */
 
 #define VL_SOF0         0xAAU
 #define VL_SOF1         0x55U
@@ -56,10 +56,10 @@ typedef enum
     COLOR_ANY = 0,
     COLOR_RED = 1,
     COLOR_YELLOW = 2,
-    COLOR_GREEN = 3,
-    COLOR_LIGHT_BLUE = 4,
-    COLOR_BLUE = 5,
-    COLOR_BLACK = 6,
+    COLOR_BLUE = 3,
+    COLOR_GREEN = 4,
+    COLOR_BLACK = 5,
+    COLOR_LIGHT_BLUE = 6,
 } VisionColor;
 
 typedef struct
@@ -74,7 +74,8 @@ typedef struct
     uint32_t heartbeat_ms;
     uint8_t host_state, host_fps;
 
-    uint8_t task[VL_MAX_ITEMS], task_len;
+    char task_text[VL_MAX_PAYLOAD + 1U]; // 以 NUL 结尾
+    uint8_t task_len;
     uint32_t task_ms;
 
     VisionMaterial material[VL_MAX_ITEMS];

@@ -33,6 +33,7 @@
 #include "chassis_cmd.h"
 #include "agv_config.h"
 #include "agv_run.h"
+#include "competition.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -131,6 +132,12 @@ int main(void)
     Error_Handler();
   }
   Agv_Init(AGV_MODE, AGV_START_ZONE);
+#if AGV_MODE == AGV_MODE_COMPETITION
+  if (Comp_Init(AGV_START_ZONE) != HAL_OK) // 比赛模式：C1 雷达(USART1) + 视觉上位机(USART2) + 扫码模块(USART3)
+  {
+    Error_Handler();
+  }
+#endif
   if (ChassisCmd_Init(&huart6) != HAL_OK) // USART6 接收定距移动命令
   {
     Error_Handler();

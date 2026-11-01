@@ -31,6 +31,7 @@
 #include "chassis.h"
 #include "chassis_cmd.h"
 #include "agv_run.h"
+#include "competition.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -186,6 +187,10 @@ void StartChassisTask(void *argument)
     ChassisCmd_Poll();
 
     Agv_Tick();
+
+#if AGV_MODE == AGV_MODE_COMPETITION
+    Comp_Tick();
+#endif
 
     next_tick += period;
 

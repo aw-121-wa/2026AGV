@@ -1,14 +1,17 @@
 #ifndef COMPETITION_H
 #define COMPETITION_H
 
+#include "main.h"
 #include "agv_config.h"
 #include "lidar_obstacle.h"
+#include "task_code.h"
 #include "vision_link.h"
 #include <stdint.h>
 
 /* 比赛模式（AGV_MODE_COMPETITION）运行框架：
    - USART1 驱动 RPLIDAR C1，实时识别黑色障碍物并写入栅格地图；
-   - USART2 与视觉上位机通信：下发位姿 / 视觉模式 / 障碍物，接收任务码、物料和圆环偏差；
+   - USART2 与视觉上位机通信：下发位姿 / 视觉模式 / 障碍物，接收物料和圆环偏差；
+   - USART3 接二维码扫码模块读任务码，相机是备用通道（TASK 帧），两路共用一套解析校验；
    - 维护场地坐标位姿（与跑图模式相同约定：上电时车头朝场地 +X，原点为出发区中心）。
    只在比赛模式下由 main.c / freertos.c 调用；另外两个模式完全不涉及。
    后续比赛流程（取料 / 放料状态机）直接读 comp、vision、地图，并用 Comp_SetVisionMode 切换视觉任务。 */
@@ -32,11 +35,14 @@ typedef struct
     uint8_t vision_online;
     VisionMode vision_mode;
     uint8_t vision_color;
+    uint8_t task_valid;     // task 里是读到过的合法任务码
+    TaskCode task;          // 最新的合法任务码；读到新的合法码就更新
+    uint32_t task_rejected; // 读到但不合法的次数
 } CompStatus;
 
 extern CompStatus comp;
 
-/* 调度器启动前调用：建图、初始化两路串口。 */
+/* 调度器启动前调用：建图、初始化三路串口。 */
 HAL_StatusTypeDef Comp_Init(unsigned zone);
 
 /* 底盘任务每周期（5 ms）调用一次。 */

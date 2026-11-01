@@ -55,7 +55,7 @@ static void TestVisionLink(void)
     VisionLink_Init();
     uint8_t f[VL_FRAME_MAX];
     /* 上位机物料帧：红色前 12.3 mm 左 -4.5 mm；蓝色 0/0。 */
-    uint8_t mp[11] = {2, 1, 123, 0, (uint8_t)-45, 0xFF, 5, 0, 0, 0, 0};
+    uint8_t mp[11] = {2, 1, 123, 0, (uint8_t)-45, 0xFF, 3, 0, 0, 0, 0};
     unsigned n = VisionLink_Encode(VL_HOST_MATERIALS, mp, sizeof(mp), f);
     uint8_t ok = 0;
     VisionLink_Feed(0x13, 1); // 前导垃圾
@@ -75,17 +75,34 @@ static void TestVisionLink(void)
     for (unsigned i = 0; i < n; ++i)
         VisionLink_Feed(f[i], 300);
     assert(vision.ring_found && vision.ring_aligned && fabsf(vision.ring_left_mm - 2.0f) < 1e-3f);
-    uint8_t tp[4] = {3, 1, 2, 3};
-    n = VisionLink_Encode(VL_HOST_TASK, tp, sizeof(tp), f);
+    /* 最长的文本也放得下并以 NUL 结尾。 */
+    uint8_t long_text[VL_MAX_PAYLOAD];
+    memset(long_text, 'x', sizeof(long_text));
+    n = VisionLink_Encode(VL_HOST_TASK, long_text, sizeof(long_text), f);
     for (unsigned i = 0; i < n; ++i)
-        VisionLink_Feed(f[i], 400);
-    assert(vision.task_len == 3 && vision.task[2] == 3);
+        VisionLink_Feed(f[i], 390);
+    assert(vision.task_len == VL_MAX_PAYLOAD && vision.task_text[VL_MAX_PAYLOAD - 1U] == 'x' &&
+           vision.task_text[VL_MAX_PAYLOAD] == '\0' && vision.task_ms == 390);
+    /* TASK 帧带二维码原文，字节与 tests/vision_protocol_test.py 里上位机发出的相同；
+       比上一帧短也要正确结束，不残留上一帧的内容。 */
+    static const uint8_t task_frame[] = {0xAA, 0x55, 15,  0x02, 0x00, '1', '5', '6', '+', '1', '2',
+                                         '3',  '+',  '5', '1',  '6',  '+', '2', '3', '1', 0xD6};
+    for (unsigned i = 0; i < sizeof(task_frame); ++i)
+        VisionLink_Feed(task_frame[i], 400);
+    assert(vision.task_len == 15 && strcmp(vision.task_text, "156+123+516+231") == 0 &&
+           vision.task_ms == 400);
+    /* 空文本是坏帧，不覆盖已有内容。 */
+    n = VisionLink_Encode(VL_HOST_TASK, long_text, 0, f);
+    for (unsigned i = 0; i < n; ++i)
+        VisionLink_Feed(f[i], 420);
+    assert(vision.bad_frames == 1 && vision.task_len == 15 && vision.task_ms == 400);
     assert(VisionLink_Online(450, 500) && !VisionLink_Online(1000, 500));
     /* 长度不符的心跳帧计入 bad_frames。 */
-    n = VisionLink_Encode(VL_HOST_HEARTBEAT, tp, 3, f);
+    const uint8_t hb[3] = {1, 2, 3};
+    n = VisionLink_Encode(VL_HOST_HEARTBEAT, hb, sizeof(hb), f);
     for (unsigned i = 0; i < n; ++i)
         VisionLink_Feed(f[i], 500);
-    assert(vision.bad_frames == 1);
+    assert(vision.bad_frames == 2);
     /* 下行位姿帧格式。 */
     n = VisionLink_EncodePose(1234.4f, -20.0f, -90.5f, 1, f);
     assert(n == 13 && f[0] == 0xAA && f[1] == 0x55 && f[2] == 7 && f[3] == VL_MCU_POSE);
@@ -205,7 +222,7 @@ static void TestObstacles(void)
     }
     assert(Map_Revision() == rev + 3);
     /* 继续扫描不会重复登记。 */
-    RunScans(&pose, cyl, 3, 10);
+    RunScans(&pose, cyl, 3, 200);
     assert(LidarObs_List(list, 16) == 3 && Map_Revision() == rev + 3);
     MapPoint p;
     unsigned popped = 0;
@@ -220,13 +237,14 @@ static void TestObstacles(void)
     Map_Init();
     LidarObs_Init();
     LidarPose p2 = {1200, 250, -15.0f};
-    RunScans(&p2, cyl, 0, 20);
+    RunScans(&p2, cyl, 0, 200);
     assert(LidarObs_List(list, 16) == 0);
     printf("lidar obstacle OK\n");
 }
 
 int main(void)
 {
+    setvbuf(stdout, NULL, _IONBF, 0);
     TestParser();
     TestVisionLink();
     TestObstacles();

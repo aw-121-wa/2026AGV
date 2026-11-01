@@ -105,6 +105,9 @@ tests/host/                   PC 端单元测试 + 假 HAL
 | `command_path_test.c` | 运动中命令排队、分片命令、`S` 清队、错误行原子性、`DONE path` 统计只打印一次、长指令流追加 |
 | `agv_test.c` | 巡检整圈覆盖/回库/停锁/占领出发区/底盘故障/碰墙/地图失效/航向超限/总超时/BUSY 重试 |
 | `mode_test.c` | 三种 `AGV_MODE` 下的命令门控、`S`、接收溢出 |
+| `task_test.c` | 任务码解析：规则示例、颜色编号、第二批码垛环号、各类非法码、模块字节流分行 |
+| `comp_task_test.c` | 比赛模式任务码通道：扫码模块和相机文本经 `competition.c` 进入 `comp.task`，错码不覆盖好码 |
+| `../vision_protocol_test.py` | 上位机颜色编号和 TASK 帧字节（与 `comp_test.c` 解码的帧相同） |
 
 ---
 
@@ -114,7 +117,7 @@ tests/host/                   PC 端单元测试 + 假 HAL
 |---|---|
 | 0 COMMAND | 串口指令模式，底盘按 USART6 命令走（默认限速 100 mm/s） |
 | 1 SURVEY | 纯底盘跑全图巡检，READY 且等待 3 s 后自动出发（150 mm/s） |
-| 2 COMPETITION | 预留，仅置空闲 |
+| 2 COMPETITION | C1 雷达障碍识别 + 视觉上位机串口通信 + 扫码模块读任务码（见第 9 节）；取放料流程待接入 |
 
 底盘模式（`chassis.mode`）：`VEL` 速度模式 / `MOVE` 定距 / `TURN` 转向 / `PATH` 连续航点。
 
@@ -388,3 +391,73 @@ s_move_speed_limit（指令 100 / 巡检 150，Chassis_SetMoveSpeedLimit 设置�
 | 电机安装方向写死 | 左右镜像安装的电机无法在软件里修正，只能去驱动器菜单改 | `CHASSIS_WHEEL_DIR_xx`（命令与反馈同时乘方向），配合 `W` 单轮测试 |
 | 没有陀螺仪就不能动 | 反馈检查强制要求 IMU，底盘单测时永远停在 IDLE | `CHASSIS_USE_IMU=0` 时航向由四轮里程计推算 |
 | 输出只有机器帧 | `$T/$V/$H/...` 20 Hz 刷屏，串口助手里不可读，依赖上位机 | 改为可读文本：事件行、回执、1 Hz 状态行（`D` 可调）、`H` 帮助、`I` 诊断 |
+
+---
+
+## 9. 比赛模式：激光雷达与视觉串口
+
+只在 `AGV_MODE=2` 时编译/启用（`main.c`、`freertos.c` 里的调用都包在 `#if AGV_MODE == AGV_MODE_COMPETITION` 中，`ser_port.c` / `competition.c` 在其他模式下编译为空），指令模式和跑图模式行为不变。参数集中在 `User/Config/comp_config.h`。
+
+### 9.1 接线
+
+| 外设 | 引脚 | 参数 | 对端 |
+|---|---|---|---|
+| USART1 | PA9 = TX → 雷达 RX，PA10 = RX ← 雷达 TX | 460800 8N1 | RPLIDAR C1（5V 单独供电，共地，3.3V 电平） |
+| USART2 | PA2 = TX → 上位机 RX，PA3 = RX ← 上位机 TX | 115200 8N1 | 视觉上位机 |
+| USART3 | PB10 = TX → 模块 RX，PB11 = RX ← 模块 TX | 9600 8N1（`COMP_SCANNER_BAUD`） | 二维码扫码模块 |
+
+这三路串口不进 `.ioc`：时钟、引脚、NVIC（优先级 6）都在 `SerPort_Init` 里配置，寄存器级中断收发 + 环形缓冲，不用 DMA（不涉及 D-Cache/MPU），CubeMX 重新生成不会覆盖。
+
+### 9.2 雷达障碍物识别（`User/Navigation/lidar_obstacle.c`）
+
+1. 上电 600 ms 后发 STOP，20 ms 后发 SCAN（标准扫描，约 10 Hz、0.72°）；1 s 无数据自动重启。
+2. 每个点按**当前位姿**换算到场地坐标（底盘任务 5 ms 处理一次，运动补偿误差可忽略）。
+3. 丢弃：距离 < 160 mm（车体自身）或 > 1800 mm；离围挡 < 60 mm；离已知静态结构（四个岛、暂存/粗加工区、原料台）或已登记障碍 < 40 mm。
+4. 沿扫描顺序聚类（相邻点 ≤ 45 mm），簇弦长 ≤ 95 mm 视为 Ø50 圆柱；弧上点重心沿视线外推 2r/π 得圆心。
+5. 跨圈关联（60 mm），连续 4 圈命中才确认，确认后 `Map_AddObstacle(x, y, 35)` 写入栅格地图，地图版本号 +1，A* 自动避开。
+
+雷达扫描平面必须低于 100 mm（障碍物高度）。安装位置/朝向改 `COMP_LIDAR_X_MM / Y_MM / YAW_DEG`。
+主机仿真测试（±15/±30 mm 测距噪声、200 圈）：圆心误差 ≤ 10 mm，岛角和围挡无误报。
+
+### 9.3 视觉串口协议
+
+见 `User/Comm/vision_link.h` 文件头（与 `vision/stm32_link.py` 一致）。后续取放料流程通过以下接口使用：
+
+- `comp.x / comp.y / comp.heading_deg`：场地位姿；`comp.anchored` 置位后有效。
+- `vision.material[] / ring_*`：上位机最新结果，`*_ms` 为收到时刻，用前检查新鲜度。
+- `Comp_SetVisionMode(VISION_MATERIAL, COLOR_RED)` 等：切换上位机识别任务。
+- `comp.task / comp.task_valid`：任务码，见 9.5。
+
+### 9.4 串口助手输出（USART6，1 Hz）
+
+```
+COMP pose=(2250,2250,0.0) lidar=RUN 10.1Hz pts=.. used=.. clu=.. obs=2 rs=0/0 | vision=ON mode=2 mat=3 ring=0 crc=0 | task=156+123+516+231 rej=0 scan=320/0
+COMP obstacle #2 at (1203,1698)
+COMP task 156+123+516+231 from scanner, batch 2 storage rings 2 1 3
+COMP task rejected (format) from scanner: 123+321
+```
+`rs=a/b`：a = 雷达重启次数，b = 协议失步次数；`crc` 为视觉帧校验失败数；`rej` 为读到但不合法的次数；`scan=a/b`：a = 扫码串口收到的字节数，b = 串口硬件错误数（a 不涨查接线和模块读码模式，b 涨查波特率）。
+
+### 9.5 任务码（`User/App/task_code.c`）
+
+规则格式：四组三位数，以 `+` 连接。第 1、3 组是两批物料的颜色（按搬运顺序），第 2 组是第一批在粗加工区和暂存区的环号，第 4 组是第二批在粗加工区的环号。第二批在暂存区码垛到第一批同色物料上，环号不在码里，解析时推出来。
+
+例：`156+123+516+231`
+
+| 批次 | 搬运顺序 | 粗加工区环号 | 暂存区环号 |
+|---|---|---|---|
+| 1 | 红 黑 浅蓝 | 1 2 3 | 1 2 3 |
+| 2 | 黑 红 浅蓝 | 2 3 1 | 2 1 3（码垛） |
+
+颜色编号：1 红 2 黄 3 蓝 4 绿 5 黑 6 浅蓝，与 `VisionColor`、`vision/config.py` 一致。
+
+- 合法条件：格式完整；每批三种不同颜色；第二批与第一批颜色相同；环号 1、2、3 各一次。不合法的内容打印原文后丢弃，已有的合法码不变。
+- 读到新的合法码就更新 `comp.task`。取放料流程要在一键启动时清掉 `comp.task_valid`，并在开始搬运后用自己的副本，避免调试时扫过的码或中途误读影响本轮任务。
+- 单片机保存任务并决定下一步；取料时用 `Comp_SetVisionMode(VISION_MATERIAL, comp.task.color[批次][顺序])` 告诉上位机要找的颜色，上位机不保存任务码。相机通道（`VISION_QR`）只是备用，上位机把读到的原文用 TASK 帧发回来，走同一套解析。
+
+扫码模块设置（固件不发配置命令，用模块手册里的设置码配好）：
+
+1. 连续或感应读码模式：固件不发触发命令。
+2. 关掉补光灯和瞄准灯：规则只允许垂直向下补光。
+3. 串口 8N1，波特率与 `COMP_SCANNER_BAUD` 一致；有 CR/LF 后缀最好，没有也能靠 `COMP_SCANNER_IDLE_MS` 分行。
+

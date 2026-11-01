@@ -33,25 +33,21 @@ COLOR_RANGES = {
     "blue":       [((101, 120, 40), (130, 255, 255))],  # 深蓝：色相偏高
     "black":      [((0, 0, 0), (179, 255, 55))],
 }
-# 颜色编号（与单片机协议一致）
-COLOR_ID = {"red": 1, "yellow": 2, "green": 3, "light_blue": 4, "blue": 5, "black": 6}
+# 颜色编号（比赛规则的任务码编号，与单片机协议一致）
+COLOR_ID = {"red": 1, "yellow": 2, "blue": 3, "green": 4, "black": 5, "light_blue": 6}
 
 MIN_BLOB_AREA_PX = 400
 
-# ---------------- 雷达 ----------------
-LIDAR_PORT = "/dev/ttyUSB0"
-LIDAR_BAUD = 230400           # LD19 / LD06 / STL-19P
-LIDAR_TYPE = "ld19"           # "ld19" 或 "rplidar"
-LIDAR_MIN_RANGE_MM = 80
-LIDAR_MAX_RANGE_MM = 3500
-# 雷达在车体坐标系中的安装位置 (mm) 和朝向偏置 (deg)
-LIDAR_OFFSET_X_MM = 0.0
-LIDAR_OFFSET_Y_MM = 0.0
-LIDAR_YAW_OFFSET_DEG = 0.0
-CLUSTER_GAP_MM = 30           # 相邻点距离大于此值则断开聚类
-OBSTACLE_D_TOL_MM = 25        # 聚类直径落在 50±25 视为障碍物
-WALL_MARGIN_MM = 40           # 离边界太近的点视为围挡，丢弃
+# 图像偏差 -> 车体坐标（前 / 左，mm）的符号矩阵：
+#   fwd  = CAM_TO_BODY[0][0]*dx + CAM_TO_BODY[0][1]*dy
+#   left = CAM_TO_BODY[1][0]*dx + CAM_TO_BODY[1][1]*dy
+# dx/dy 为（目标像素 - TARGET_PX）* MM_PER_PX，图像 x 向右、y 向下。
+# 默认：相机俯视、画面上方 = 车头方向 → 目标在画面上方(dy<0)即在前方，在画面左侧(dx<0)即在左方。
+CAM_TO_BODY = ((0, -1), (-1, 0))
 
 # ---------------- 与 STM32 通信 ----------------
+# 接 STM32 的 USART2（PA2 = MCU TX → 上位机 RX，PA3 = MCU RX ← 上位机 TX），3.3V 电平，共地。
+# 激光雷达 C1 直接接在 STM32 的 USART1 上，由单片机处理，上位机不再接雷达。
 MCU_PORT = "/dev/ttyAMA0"
 MCU_BAUD = 115200
+HEARTBEAT_HZ = 10

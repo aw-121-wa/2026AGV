@@ -26,7 +26,7 @@ uint8_t VisionLink_Crc8(const uint8_t *data, unsigned len)
     {
         crc ^= *data++;
         for (unsigned i = 0; i < 8U; ++i)
-            crc = (uint8_t)((crc & 0x80U) ? (crc << 1) ^ 0x07U : crc << 1);
+            crc = (uint8_t)((crc & 0x80U) ? ((unsigned)crc << 1) ^ 0x07U : (unsigned)crc << 1);
     }
     return crc;
 }
@@ -61,10 +61,11 @@ static uint8_t Dispatch(uint8_t type, const uint8_t *p, uint8_t len, uint32_t no
         vision.heartbeat_ms = now;
         return 1;
     case VL_HOST_TASK:
-        if (len < 1U || p[0] > VL_MAX_ITEMS || len != 1U + p[0])
+        if (len < 1U)
             return 0;
-        vision.task_len = p[0];
-        memcpy(vision.task, p + 1, p[0]);
+        memcpy(vision.task_text, p, len);
+        vision.task_text[len] = '\0';
+        vision.task_len = len;
         vision.task_ms = now;
         return 1;
     case VL_HOST_MATERIALS:

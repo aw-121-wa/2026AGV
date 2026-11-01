@@ -42,8 +42,12 @@ static uint8_t Interesting(float x, float y)
     const float w = COMP_OBS_WALL_MM, s = COMP_OBS_STATIC_MM;
     if (x < w || y < w || x > MAP_WIDTH_MM - w || y > MAP_HEIGHT_MM - w)
         return 0;
-    return FreeAt(x, y) && FreeAt(x - s, y) && FreeAt(x + s, y) && FreeAt(x, y - s) &&
-           FreeAt(x, y + s);
+    /* 3×3 采样（含对角），矩形结构的角点附近也能挡住。 */
+    for (int i = -1; i <= 1; ++i)
+        for (int j = -1; j <= 1; ++j)
+            if (!FreeAt(x + i * s, y + j * s))
+                return 0;
+    return 1;
 }
 
 static void Track_Update(float x, float y)

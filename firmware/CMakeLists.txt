@@ -55,6 +55,13 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User/Navigation/astar.c
     User/Navigation/survey.c
     User/App/agv_run.c
+    # 比赛模式：串口 / C1 雷达 / 障碍识别 / 视觉协议 / 任务码（其他模式不调用）
+    User/Drivers/SerPort/ser_port.c
+    User/Drivers/RPLidar/rplidar.c
+    User/Navigation/lidar_obstacle.c
+    User/Comm/vision_link.c
+    User/App/competition.c
+    User/App/task_code.c
 )
 
 # Add include paths
@@ -64,6 +71,8 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     User/Common
     User/Drivers/HWT101
     User/Drivers/ZDT_X42S
+    User/Drivers/SerPort
+    User/Drivers/RPLidar
     User/Chassis
     User/Comm
     User/Navigation
