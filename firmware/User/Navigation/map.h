@@ -29,6 +29,9 @@
 
 /* Conservative reservation for raw table intrusion (75-85 mm). */
 #define MAP_TOP_RESERVE_MM 85
+/* 转盘 Ø300，圆心 x 在 1100~1300 之间随机：场地边上它可能占到的 x 范围。 */
+#define MAP_TABLE_X_MIN 964
+#define MAP_TABLE_X_MAX 1436
 
 #define MAP_MAX_OBSTACLES 16
 

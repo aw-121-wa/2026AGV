@@ -61,6 +61,19 @@ void Chassis_Stop(void)
 {
     ++stop_calls;
 }
+#if AGV_MODE == AGV_MODE_COMPETITION
+static unsigned run_stops;
+static uint8_t run_going;
+void Comp_Stop(void)
+{
+    ++run_stops;
+    run_going = 0U;
+}
+uint8_t Comp_Running(void)
+{
+    return run_going;
+}
+#endif
 void Agv_Stop(void)
 {
     ++latches;
@@ -99,7 +112,7 @@ int main(void)
     ChassisCmd_Poll();
     assert(console_calls == 1U && strcmp(console_seen, "set heading_tol 2") == 0);
     assert(stop_calls == 0U && latches == 0U);
-    /* 巡检模式路线固定，不接受手动运动；比赛模式还没有流程，可以手动开车调试。 */
+    /* 巡检模式路线固定，不接受手动运动；比赛模式流程没跑时可以手动开车调试。 */
     memcpy(rx_buf, "F100", 4);
     ChassisCmd_RxEvent(&u, 4);
     ChassisCmd_Poll();
@@ -116,5 +129,25 @@ int main(void)
     ChassisCmd_RxEvent(&u, 3);
     ChassisCmd_Poll();
     assert(wheel_calls == (AGV_MODE == AGV_MODE_SURVEY ? 0U : 1U));
+#if AGV_MODE == AGV_MODE_COMPETITION
+    /* 比赛流程运行中不接受手动运动和单轮测试，S 能停流程。 */
+    unsigned moves = move_calls, wheels = wheel_calls, stops = run_stops;
+    run_going = 1U;
+    memcpy(rx_buf, "F100\n", 5);
+    ChassisCmd_RxEvent(&u, 5);
+    ChassisCmd_Poll();
+    memcpy(rx_buf, "W\n", 2);
+    ChassisCmd_RxEvent(&u, 2);
+    ChassisCmd_Poll();
+    assert(move_calls == moves && wheel_calls == wheels && run_going);
+    memcpy(rx_buf, "S\n", 2);
+    ChassisCmd_RxEvent(&u, 2);
+    ChassisCmd_Poll();
+    assert(run_stops == stops + 1U && !run_going);
+    memcpy(rx_buf, "F100\n", 5);
+    ChassisCmd_RxEvent(&u, 5);
+    ChassisCmd_Poll();
+    assert(move_calls == moves + 1U);
+#endif
     printf("mode %d command gating/stop/overflow OK\n", AGV_MODE);
 }

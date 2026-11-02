@@ -1,13 +1,15 @@
 #ifndef CHASSIS_TELEMETRY_H
 #define CHASSIS_TELEMETRY_H
 
+#include "map.h"
 #include "usart.h"
 
 /* 串口文本输出（USART6，直接用串口助手看，不需要上位机）：
    - 每行都是可读的 ASCII 文本，以 \r\n 结尾；串口助手选 115200 8N1、ASCII/文本显示。
    - 周期状态行默认 1 Hz（命令 D0 关闭，D1..D10 设置频率）；状态变化、命令回执、
      路径完成、单轮测试结果都会立即单独打印一行。
-   - 所有文本先进环形发送缓冲区，再用中断分块发送；缓冲区满时丢弃新文本并计数。 */
+   - 所有文本先进环形发送缓冲区，再用中断分块发送；缓冲区满时丢弃新文本并计数。
+     这里永远不等串口：输出只在底盘任务里、控制计算之后做，只占几十微秒，不会拖累控制周期。 */
 
 /* 绑定与命令接收相同的串口，并排队打印开机信息。 */
 void ChassisTelemetry_Init(UART_HandleTypeDef *uart);
@@ -26,6 +28,15 @@ void ChassisTelemetry_Puts(const char *text);
 
 /* 周期状态行频率：0 = 关闭，1..10 Hz。 */
 void ChassisTelemetry_SetRate(unsigned hz);
+
+/* 周期输出开着吗（D0 关）。其他模块的周期文本也跟着它。 */
+uint8_t ChassisTelemetry_Periodic(void);
+
+/* 发送一条路线给调试台：ROUTE points <n>，n 行 ROUTE <序号> <x> <y>（场地 mm），ROUTE end。
+   一拍只发一行，发送缓冲过半就等：路线再长也不占控制节拍，也不挤掉状态行和命令回执。
+   发送期间会反复调用 point 取第 index 个点。新路线会打断没发完的旧路线。 */
+typedef MapPoint (*telemetry_route_point)(unsigned index);
+void ChassisTelemetry_SendRoute(unsigned count, telemetry_route_point point);
 
 /* 把 value 格式化成 decimals 位小数（newlib-nano 的 printf 没有浮点），一次 Printf 最多用 24 个。 */
 const char *ChassisTelemetry_Num(float value, unsigned decimals);

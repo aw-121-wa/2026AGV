@@ -52,8 +52,13 @@ def main():
     run('survey_loop_test', NAV + ['User/App/agv_run.c'], ['-DAGV_MODE=1'])
     run('comp_task_test', ['User/App/competition.c', 'User/App/task_code.c',
                            'User/Comm/console.c',
-                           'User/Navigation/map.c', 'User/Navigation/lidar_obstacle.c',
+                           'User/Navigation/map.c', 'User/Navigation/astar.c',
+                           'User/Navigation/lidar_obstacle.c',
                            'User/Drivers/RPLidar/rplidar.c', 'User/Comm/vision_link.c'],
+        ['-DAGV_MODE=2'])
+    run('comp_route_test', NAV + ['User/App/agv_run.c', 'User/App/competition.c',
+                                  'User/App/task_code.c', 'User/Navigation/lidar_obstacle.c',
+                                  'User/Drivers/RPLidar/rplidar.c', 'User/Comm/vision_link.c'],
         ['-DAGV_MODE=2'])
     subprocess.run([sys.executable, 'tests/vision_protocol_test.py'], cwd=ROOT, check=True,
                    timeout=60)

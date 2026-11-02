@@ -7,7 +7,8 @@
 <!--
   车载固件的调试界面：用 Chrome 或 Edge 直接打开这个文件，通过 USB 转串口连 STM32 的 USART6（115200）。
   不联网、不依赖任何库。所有数据都来自固件的文本输出（README 4.4 节），解析规则集中在 parseLine，
-  文本格式由 firmware/tests/host/console_test.c、comp_task_test.c 和 survey_loop_test.c 逐字固定。
+  文本格式由 firmware/tests/host/console_test.c、comp_task_test.c、comp_route_test.c 和
+  survey_loop_test.c 逐字固定。
   参数列表来自固件的 /list：固件里加参数不用改这里，只是没有中文说明时显示英文名，放在“其他”组。
 -->
 <style>
@@ -93,10 +94,18 @@ header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
 }
 #notice { display: none; padding: 8px 12px; background: var(--warn-soft); border-bottom: 1px solid var(--line); gap: 10px; align-items: center; flex-wrap: wrap; }
 #notice.show { display: flex; }
-main {
-  flex: 1; min-height: 0; display: grid; gap: 8px; padding: 8px;
-  grid-template-columns: 330px minmax(0, 1fr) 350px;
-}
+[hidden] { display: none !important; }
+#tabs { display: flex; align-items: center; gap: 2px; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+#tabs button { background: transparent; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 6px 14px; min-height: 34px; color: var(--text-2); }
+#tabs button:hover { color: var(--text); }
+#tabs button[aria-selected=true] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+#tabHint { margin-left: 10px; }
+body[data-mode=COMMAND] #tabs [data-ws=task], body[data-mode=COMMAND] #tabs [data-ws=map], body[data-mode=SURVEY] #tabs [data-ws=task] { display: none; }
+main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.workspace { flex: 1; min-height: 0; display: none; gap: 8px; padding: 8px; }
+.workspace.active { display: grid; }
+#wsDebug { grid-template-columns: 330px minmax(0, 1fr) 350px; }
+#wsTask, #wsMap { grid-template-columns: minmax(0, 1fr) 350px; }
 .column { display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; min-height: 0; }
 .panel > h2 { font-size: 13px; font-weight: 600; margin: 0; padding: 8px 10px 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -176,28 +185,56 @@ td { text-align: right; padding: 1px 4px; border-top: 1px solid var(--line); }
 .inline input[type=number] { width: 76px; }
 .inline input[type=text] { flex: 1; min-width: 0; }
 
-/* 各模式才有的面板 */
-#surveyPanel, #mapPanel, #compPanels { display: none; }
+/* 各模式才有的内容 */
+#surveyPanel { display: none; }
 body[data-mode=SURVEY] #surveyPanel { display: flex; }
-body[data-mode=SURVEY] #mapPanel, body[data-mode=COMPETITION] #mapPanel { display: flex; }
-body[data-mode=COMPETITION] #compPanels { display: flex; flex-direction: column; gap: 8px; }
-body:not([data-mode=COMPETITION]) .comp-only { display: none; }
-#map { width: 100%; aspect-ratio: 1 / 1; display: block; border-radius: 6px; }
-body[data-mode=COMPETITION] #map { cursor: crosshair; }
-.chips { display: flex; gap: 4px; align-items: center; }
+body[data-mode=SURVEY] .comp-only, body[data-mode=COMMAND] .comp-only { display: none; }
+.scroll-column { overflow-y: auto; }
+.scroll-column > * { flex: none; }
+
+/* 任务物料 */
+.chips { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
 .chip { display: inline-flex; align-items: center; gap: 4px; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; white-space: nowrap; }
 .chip i { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(128,128,128,.6); }
-#taskCode { font-size: 18px; font-weight: 600; letter-spacing: 1px; }
-#sideColumn { overflow-y: auto; }
-#sideColumn > *, #compPanels > * { flex: none; }
+#taskCode { font-size: 26px; font-weight: 600; letter-spacing: 2px; }
+#taskDetail { display: flex; flex-direction: column; gap: 8px; }
+.flow { color: var(--text-3); font-size: 12px; font-weight: 400; }
+.batch-title { font-size: 12px; font-weight: 600; color: var(--text-2); margin: 10px 0 6px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.batch-title:first-child { margin-top: 0; }
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; align-items: center; }
+.card .swatch { grid-row: span 3; width: 38px; height: 38px; border-radius: 50%; border: 1px solid rgba(128,128,128,.6); }
+.card b { font-size: 15px; }
+.card span { color: var(--text-2); font-size: 12px; }
+.empty { color: var(--text-3); text-align: center; padding: 28px 16px; }
+#ringTable td, #ringTable th { text-align: center; padding: 4px; }
+#ringTable td:first-child, #ringTable th:first-child { text-align: left; }
+#ringTable .chip { justify-content: center; }
+
+/* 地图路径 */
+#mapPanel { min-height: 0; }
+#mapWrap { position: relative; flex: 1; min-height: 240px; margin: 0 10px 10px; }
+#map { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: block; border-radius: 6px; cursor: crosshair; }
+body[data-mode=SURVEY] #map { cursor: default; }
+.legend { display: inline-flex; flex-wrap: wrap; gap: 2px 12px; font-weight: 400; font-size: 12px; color: var(--text-2); }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { display: inline-block; }
+.legend .l-route { width: 16px; height: 3px; background: #d9480f; border-radius: 2px; }
+.legend .l-trace { width: 16px; height: 2px; background: #1f5fd0; border-radius: 2px; }
+.legend .l-scan { width: 9px; height: 9px; border: 2px solid #6250d6; transform: rotate(45deg); }
+.legend .l-obs { width: 9px; height: 9px; background: #111; border-radius: 50%; border: 1px solid #fff; outline: 1px solid var(--line); }
+#mapHover { min-width: 104px; text-align: right; }
+#obsList { margin-top: 4px; }
 
 @media (max-width: 1100px) {
   html, body { height: auto; }
-  main { grid-template-columns: minmax(0, 1fr); }
+  #wsDebug, #wsTask, #wsMap { grid-template-columns: minmax(0, 1fr); }
   #paramBody { max-height: 50vh; }
   #plotPanel { min-height: 420px; }
   #log { min-height: 200px; max-height: 40vh; }
-  #sideColumn { overflow: visible; }
+  .scroll-column { overflow: visible; }
+  #mapWrap { flex: none; aspect-ratio: 1 / 1; min-height: 0; }
+  .cards { grid-template-columns: minmax(0, 1fr); }
 }
 </style>
 </head>
@@ -211,183 +248,203 @@ body[data-mode=COMPETITION] #map { cursor: crosshair; }
   <span id="linkPill" class="pill">未连接</span>
   <span id="statePill" class="pill">底盘 --</span>
   <span id="modePill" class="pill">模式 --</span>
+  <span id="runPill" class="pill comp-only">流程 --</span>
+  <button id="startBtn" class="needs-link comp-only" title="比赛时要接启动按钮，这里是台架调试用的">开始比赛流程</button>
   <span class="spacer"></span>
   <button id="stop" class="needs-link" title="立即停车，也用来清故障。快捷键 Esc">急停 / 清故障 (Esc)</button>
 </header>
+<nav id="tabs" role="tablist" aria-label="工作区">
+  <button role="tab" data-ws="debug" aria-selected="true">调试台</button>
+  <button role="tab" data-ws="task" aria-selected="false">任务物料</button>
+  <button role="tab" data-ws="map" aria-selected="false">地图路径</button>
+  <span id="tabHint" class="muted small"></span>
+</nav>
 <div id="notice" role="status"></div>
 
 <main>
-  <div class="column">
-    <section id="paramsPanel" class="panel">
-      <h2>参数
-        <span class="spacer" style="flex:1"></span>
-        <button id="reload" class="needs-link">读取</button>
-        <button id="resetAll" class="needs-link">全部恢复默认</button>
-        <button id="exportParams">导出</button>
-        <button id="importParams" class="needs-link">导入</button>
-        <input id="importFile" type="file" accept=".json,application/json" hidden>
-      </h2>
-      <div id="paramBody"><p class="muted">连接后自动从固件读取。</p></div>
-    </section>
-  </div>
+  <!-- 三个模式共用 -->
+  <div id="wsDebug" class="workspace active">
+    <div class="column">
+      <section id="paramsPanel" class="panel">
+        <h2>参数
+          <span class="spacer" style="flex:1"></span>
+          <button id="reload" class="needs-link">读取</button>
+          <button id="resetAll" class="needs-link run-lock">全部恢复默认</button>
+          <button id="exportParams">导出</button>
+          <button id="importParams" class="needs-link run-lock">导入</button>
+          <input id="importFile" type="file" accept=".json,application/json" hidden>
+        </h2>
+        <div id="paramBody"><p class="muted">连接后自动从固件读取。</p></div>
+      </section>
+    </div>
 
-  <div class="column">
-    <section id="plotPanel" class="panel">
-      <h2>实时曲线</h2>
-      <div class="toolbar">
-        <span class="seg" id="plotGroups">
-          <button data-group="heading" class="needs-link" aria-pressed="false">航向环</button>
-          <button data-group="speed" class="needs-link" aria-pressed="false">车速</button>
-          <button data-group="wheels" class="needs-link" aria-pressed="false">轮速</button>
-        </span>
-        <button id="plotStop" class="needs-link">停止</button>
-        <label class="check">频率
-          <select id="plotHz"><option>10</option><option>20</option><option selected>50</option><option>100</option></select>
-        </label>
-        <label class="check">窗口
-          <select id="plotWindow"><option value="5">5 秒</option><option value="10" selected>10 秒</option><option value="30">30 秒</option><option value="60">60 秒</option></select>
-        </label>
-        <button id="plotPause" aria-pressed="false">暂停</button>
-        <button id="plotClear">清空</button>
-        <button id="plotCsv">导出 CSV</button>
-      </div>
-      <div id="legend"></div>
-      <div id="plotWrap">
-        <canvas id="plot" aria-label="实时曲线"></canvas>
-        <div id="plotEmpty">点上面的“航向环”“车速”或“轮速”开始接收曲线</div>
-        <div id="tip"></div>
-      </div>
-    </section>
-
-    <section id="logPanel" class="panel">
-      <h2>终端
-        <span class="spacer" style="flex:1"></span>
-        <label class="check"><input id="showStatus" type="checkbox">状态行</label>
-        <label class="check"><input id="showPlot" type="checkbox">曲线数据</label>
-        <button id="clearLog">清屏</button>
-      </h2>
-      <div id="log" role="log"></div>
-      <form id="logForm">
-        <input id="logInput" type="text" class="mono" placeholder="发送命令，例如 F300 L200 或 /list（↑↓ 翻历史）" autocomplete="off" spellcheck="false">
-        <button class="needs-link" type="submit">发送</button>
-        <button class="needs-link" type="button" id="helpBtn">帮助</button>
-        <button class="needs-link" type="button" id="infoBtn">诊断</button>
-      </form>
-    </section>
-  </div>
-
-  <div class="column" id="sideColumn">
-    <section class="panel">
-      <h2>底盘状态</h2>
-      <div class="body">
-        <div class="kv">
-          <div><span>X mm</span><b id="sX">--</b></div>
-          <div><span>Y mm</span><b id="sY">--</b></div>
-          <div><span>航向 °</span><b id="sYaw">--</b></div>
-          <div><span>目标 °</span><b id="sTgt">--</b></div>
-          <div><span>误差 °</span><b id="sErr">--</b></div>
-          <div><span>运行时间 s</span><b id="sTime">--</b></div>
-          <div><span>vx mm/s</span><b id="sVx">--</b></div>
-          <div><span>vy mm/s</span><b id="sVy">--</b></div>
-          <div><span>wz °/s</span><b id="sWz">--</b></div>
+    <div class="column">
+      <section id="plotPanel" class="panel">
+        <h2>实时曲线</h2>
+        <div class="toolbar">
+          <span class="seg" id="plotGroups">
+            <button data-group="heading" class="needs-link" aria-pressed="false">航向环</button>
+            <button data-group="speed" class="needs-link" aria-pressed="false">车速</button>
+            <button data-group="wheels" class="needs-link" aria-pressed="false">轮速</button>
+          </span>
+          <button id="plotStop" class="needs-link">停止</button>
+          <label class="check">频率
+            <select id="plotHz"><option>10</option><option>20</option><option selected>50</option><option>100</option></select>
+          </label>
+          <label class="check">窗口
+            <select id="plotWindow"><option value="5">5 秒</option><option value="10" selected>10 秒</option><option value="30">30 秒</option><option value="60">60 秒</option></select>
+          </label>
+          <button id="plotPause" aria-pressed="false">暂停</button>
+          <button id="plotClear">清空</button>
+          <button id="plotCsv">导出 CSV</button>
         </div>
-        <div id="alarm" class="alarm"></div>
-        <table class="num" aria-label="四轮转速">
-          <thead><tr><th>轮</th><th>目标 RPM</th><th>实测 RPM</th></tr></thead>
-          <tbody id="wheels"></tbody>
-        </table>
-        <p id="lastPath" class="muted small" style="margin:8px 0 0">上一条路径：--</p>
-      </div>
-    </section>
+        <div id="legend"></div>
+        <div id="plotWrap">
+          <canvas id="plot" aria-label="实时曲线"></canvas>
+          <div id="plotEmpty">点上面的“航向环”“车速”或“轮速”开始接收曲线</div>
+          <div id="tip"></div>
+        </div>
+      </section>
 
-    <section id="surveyPanel" class="panel">
-      <h2>巡检</h2>
-      <div class="body">
-        <div class="kv">
-          <div><span>状态</span><b id="aState">--</b></div>
-          <div><span>路线段数</span><b id="aLeg">--</b></div>
-          <div><span>覆盖通道</span><b id="aCovered">--</b></div>
-          <div><span>场地 X mm</span><b id="aX">--</b></div>
-          <div><span>场地 Y mm</span><b id="aY">--</b></div>
-          <div><span>回库残差 mm</span><b id="aResidual">--</b></div>
-        </div>
-        <div id="agvAlarm" class="alarm"></div>
-      </div>
-    </section>
+      <section id="logPanel" class="panel">
+        <h2>终端
+          <span class="spacer" style="flex:1"></span>
+          <label class="check"><input id="showStatus" type="checkbox">状态行</label>
+          <label class="check"><input id="showPlot" type="checkbox">曲线数据</label>
+          <button id="clearLog">清屏</button>
+        </h2>
+        <div id="log" role="log"></div>
+        <form id="logForm">
+          <input id="logInput" type="text" class="mono" placeholder="发送命令，例如 F300 L200 或 /list（↑↓ 翻历史）" autocomplete="off" spellcheck="false">
+          <button class="needs-link" type="submit">发送</button>
+          <button class="needs-link" type="button" id="helpBtn">帮助</button>
+          <button class="needs-link" type="button" id="infoBtn">诊断</button>
+        </form>
+      </section>
+    </div>
 
-    <section class="panel">
-      <h2>运动</h2>
-      <div class="body">
-        <div class="inline" style="margin-bottom:6px">
-          <label class="check">距离 <input id="moveDist" type="number" value="200" min="1" max="5000" step="10"> mm</label>
-          <label class="check">角度 <input id="moveAngle" type="number" value="90" min="-180" max="180" step="5"> °</label>
+    <div class="column scroll-column">
+      <section class="panel">
+        <h2>底盘状态</h2>
+        <div class="body">
+          <div class="kv">
+            <div><span>X mm</span><b id="sX">--</b></div>
+            <div><span>Y mm</span><b id="sY">--</b></div>
+            <div><span>航向 °</span><b id="sYaw">--</b></div>
+            <div><span>目标 °</span><b id="sTgt">--</b></div>
+            <div><span>误差 °</span><b id="sErr">--</b></div>
+            <div><span>运行时间 s</span><b id="sTime">--</b></div>
+            <div><span>vx mm/s</span><b id="sVx">--</b></div>
+            <div><span>vy mm/s</span><b id="sVy">--</b></div>
+            <div><span>wz °/s</span><b id="sWz">--</b></div>
+          </div>
+          <div id="alarm" class="alarm"></div>
+          <table class="num" aria-label="四轮转速">
+            <thead><tr><th>轮</th><th>目标 RPM</th><th>实测 RPM</th></tr></thead>
+            <tbody id="wheels"></tbody>
+          </table>
+          <p class="lastPath muted small" style="margin:8px 0 0">上一条路径：--</p>
         </div>
-        <div class="motion">
-          <button class="needs-link" data-move="L">左移</button>
-          <button class="needs-link" data-move="F">前进</button>
-          <button class="needs-link" data-move="R">右移</button>
-          <button class="needs-link" data-turn="1">左转</button>
-          <button class="needs-link" data-move="B">后退</button>
-          <button class="needs-link" data-turn="-1">右转</button>
-        </div>
-        <div class="inline" style="margin-top:6px">
-          <button class="needs-link" id="headingZero">转回 0°</button>
-          <button class="needs-link" id="wheelTest">单轮测试</button>
-        </div>
-      </div>
-    </section>
+      </section>
 
-    <section id="mapPanel" class="panel">
-      <h2>场地
-        <span class="spacer" style="flex:1"></span>
-        <span class="muted small comp-only" id="obsCount">障碍物 0</span>
-        <button class="needs-link comp-only" id="obsRefresh">刷新</button>
-        <button class="needs-link comp-only" id="obsClear">清除</button>
-      </h2>
-      <div class="body">
-        <canvas id="map" aria-label="场地地图"></canvas>
-        <div class="comp-only">
-          <p class="muted small" style="margin:6px 0">把车搬到某处后，点地图选位置，再设定位姿。</p>
-          <div class="inline">
-            <label class="check">X <input id="poseX" type="number" value="2250" min="0" max="2400"></label>
-            <label class="check">Y <input id="poseY" type="number" value="2250" min="0" max="2400"></label>
-            <label class="check">航向 <input id="poseH" type="number" value="0" min="-180" max="180"></label>
+      <section id="surveyPanel" class="panel">
+        <h2>巡检</h2>
+        <div class="body">
+          <div class="kv">
+            <div><span>状态</span><b id="aState">--</b></div>
+            <div><span>路线段数</span><b id="aLeg">--</b></div>
+            <div><span>覆盖通道</span><b id="aCovered">--</b></div>
+            <div><span>场地 X mm</span><b id="aX">--</b></div>
+            <div><span>场地 Y mm</span><b id="aY">--</b></div>
+            <div><span>回库残差 mm</span><b id="aResidual">--</b></div>
+          </div>
+          <div id="agvAlarm" class="alarm"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>运动</h2>
+        <div class="body">
+          <div class="inline" style="margin-bottom:6px">
+            <label class="check">距离 <input id="moveDist" type="number" value="200" min="1" max="5000" step="10"> mm</label>
+            <label class="check">角度 <input id="moveAngle" type="number" value="90" min="-180" max="180" step="5"> °</label>
+          </div>
+          <div class="motion">
+            <button class="needs-link" data-move="L">左移</button>
+            <button class="needs-link" data-move="F">前进</button>
+            <button class="needs-link" data-move="R">右移</button>
+            <button class="needs-link" data-turn="1">左转</button>
+            <button class="needs-link" data-move="B">后退</button>
+            <button class="needs-link" data-turn="-1">右转</button>
           </div>
           <div class="inline" style="margin-top:6px">
-            <button class="needs-link primary" id="poseSet">设定位姿</button>
-            <button data-zone="2250">启停区 1</button>
-            <button data-zone="150">启停区 2</button>
+            <button class="needs-link" id="headingZero">转回 0°</button>
+            <button class="needs-link" id="wheelTest">单轮测试</button>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
+    </div>
+  </div>
 
-    <div id="compPanels">
+  <!-- 比赛模式：任务要求的物料 -->
+  <div id="wsTask" class="workspace">
+    <div class="column scroll-column">
       <section class="panel">
-        <h2>任务码</h2>
+        <h2>任务码
+          <span class="spacer" style="flex:1"></span>
+          <span id="taskState" class="muted small"></span>
+        </h2>
         <div class="body">
           <div id="taskCode" class="num">--</div>
-          <table class="small" aria-label="任务码含义">
-            <thead><tr><th>批次</th><th style="text-align:left">搬运顺序</th><th>粗加工环</th><th>暂存环</th></tr></thead>
-            <tbody id="taskTable"></tbody>
-          </table>
           <form id="taskForm" class="inline" style="margin-top:8px">
-            <input id="taskInput" type="text" class="mono" placeholder="156+123+516+231" autocomplete="off" spellcheck="false">
-            <button class="needs-link" type="submit">当作扫到</button>
+            <input id="taskInput" type="text" class="mono" placeholder="156+123+516+231" aria-label="任务码" autocomplete="off" spellcheck="false">
+            <button id="taskSubmit" type="submit">预览</button>
+            <button id="taskClear" class="needs-link run-lock" type="button" title="忘掉现在的码，重新打开扫码模块">重新读码</button>
           </form>
           <p id="taskMsg" class="small err-text" style="margin:4px 0 0"></p>
         </div>
       </section>
 
+      <section id="taskEmpty" class="panel">
+        <p class="empty">还没有任务码。扫码模块读到后这里自动显示；车还没好的话，可以在上面输入一个码预览。</p>
+      </section>
+
+      <div id="taskDetail" hidden>
+        <section class="panel">
+          <h2>要搬的物料</h2>
+          <div class="body">
+            <div id="needColors" class="chips"></div>
+            <p class="muted small" style="margin:6px 0 0">这三种颜色每种两个，两批各搬一个。</p>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>搬运顺序</h2>
+          <div id="batches" class="body"></div>
+        </section>
+
+        <section class="panel">
+          <h2>按环号看放哪里</h2>
+          <div class="body">
+            <table id="ringTable" aria-label="各环放置的物料">
+              <thead><tr><th>位置</th><th>1 号环</th><th>2 号环</th><th>3 号环</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div class="column scroll-column">
       <section class="panel">
-        <h2>视觉与传感器</h2>
+        <h2>视觉</h2>
         <div class="body">
           <div class="inline" style="margin-bottom:6px">
             <span class="seg" id="visionModes">
-              <button data-mode="0" class="needs-link" aria-pressed="false">关</button>
-              <button data-mode="1" class="needs-link" aria-pressed="false">二维码</button>
-              <button data-mode="2" class="needs-link" aria-pressed="false">物料</button>
-              <button data-mode="3" class="needs-link" aria-pressed="false">圆环</button>
+              <button data-mode="0" class="needs-link run-lock" aria-pressed="false">关</button>
+              <button data-mode="1" class="needs-link run-lock" aria-pressed="false">二维码</button>
+              <button data-mode="2" class="needs-link run-lock" aria-pressed="false">物料</button>
+              <button data-mode="3" class="needs-link run-lock" aria-pressed="false">圆环</button>
             </span>
             <label class="check">颜色
               <select id="visionColor">
@@ -400,13 +457,98 @@ body[data-mode=COMPETITION] #map { cursor: crosshair; }
             <div><span>上位机</span><b id="cVision">--</b></div>
             <div><span>物料数</span><b id="cMat">--</b></div>
             <div><span>圆环</span><b id="cRing">--</b></div>
-            <div><span>雷达</span><b id="cLidar">--</b></div>
-            <div><span>雷达点 / 用到</span><b id="cPts">--</b></div>
-            <div><span>重启 / 失步</span><b id="cRs">--</b></div>
-            <div><span>扫码字节 / 错误</span><b id="cScan">--</b></div>
-            <div><span>错码次数</span><b id="cRej">--</b></div>
             <div><span>校验错误</span><b id="cCrc">--</b></div>
           </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>扫码模块</h2>
+        <div class="body">
+          <div class="kv">
+            <div><span>状态</span><b id="cScanState">--</b></div>
+            <div><span>收到字节 / 错误</span><b id="cScan">--</b></div>
+            <div><span>错码次数</span><b id="cRej">--</b></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- 比赛模式和巡检模式：地图和规划的路径 -->
+  <div id="wsMap" class="workspace">
+    <section id="mapPanel" class="panel">
+      <h2>场地
+        <span class="legend">
+          <span><i class="l-route"></i>规划路线</span>
+          <span><i class="l-trace"></i>实际轨迹</span>
+          <span class="comp-only"><i class="l-scan"></i>扫描点</span>
+          <span class="comp-only"><i class="l-obs"></i>障碍物</span>
+        </span>
+        <span class="spacer" style="flex:1"></span>
+        <span id="mapHover" class="num muted small"></span>
+      </h2>
+      <div id="mapWrap"><canvas id="map" aria-label="场地地图"></canvas></div>
+    </section>
+
+    <div class="column scroll-column">
+      <section class="panel">
+        <h2>路线</h2>
+        <div class="body">
+          <div class="kv">
+            <div><span>状态</span><b id="rState">--</b></div>
+            <div><span>路线点</span><b id="rPoints">--</b></div>
+            <div><span>全长</span><b id="rLength">--</b></div>
+            <div><span>场地 X mm</span><b id="cX">--</b></div>
+            <div><span>场地 Y mm</span><b id="cY">--</b></div>
+            <div><span>航向 °</span><b id="cH">--</b></div>
+          </div>
+          <div id="routeMsg" class="alarm"></div>
+          <div class="inline comp-only" style="margin-top:8px">
+            <button id="routeGo" class="primary" disabled title="车会动，先确认路线和周围">走这条路线</button>
+            <button id="traceClear">清除轨迹</button>
+          </div>
+          <p class="lastPath muted small" style="margin:8px 0 0">上一条路径：--</p>
+        </div>
+      </section>
+
+      <section class="panel comp-only">
+        <h2>选中点</h2>
+        <div class="body">
+          <p class="muted small" style="margin:0 0 6px">点地图选一个位置。规划只算路线，车不动；把车搬过去后用“设为当前位姿”。这里是台架调试用的，比赛流程运行时锁住。</p>
+          <div class="inline">
+            <label class="check">X <input id="pickX" type="number" value="300" min="0" max="2399"></label>
+            <label class="check">Y <input id="pickY" type="number" value="300" min="0" max="2399"></label>
+            <label class="check">航向 <input id="pickH" type="number" value="0" min="-180" max="180"></label>
+          </div>
+          <div class="inline" style="margin-top:6px">
+            <button class="needs-link primary run-lock" id="routePlan">规划到这里</button>
+            <button class="needs-link run-lock" id="poseSet">设为当前位姿</button>
+          </div>
+          <div class="inline" style="margin-top:6px">
+            <button data-zone="2250">选启停区 1</button>
+            <button data-zone="150">选启停区 2</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel comp-only">
+        <h2>雷达扫描
+          <span class="spacer" style="flex:1"></span>
+          <button class="needs-link run-lock" id="scanBtn" title="清掉结果，在车现在的位置扫一次">只在这里扫一次</button>
+        </h2>
+        <div class="body">
+          <div class="kv">
+            <div><span>状态</span><b id="scanState">--</b></div>
+            <div><span>障碍物</span><b id="obsCount">--</b></div>
+            <div><span>雷达</span><b id="cLidar">--</b></div>
+            <div><span>圈数</span><b id="cRevs">--</b></div>
+            <div><span>点 / 用到</span><b id="cPts">--</b></div>
+            <div><span>重启 / 失步</span><b id="cRs">--</b></div>
+          </div>
+          <table id="obsList" class="num small" aria-label="障碍物坐标">
+            <tbody></tbody>
+          </table>
         </div>
       </section>
     </div>
@@ -438,15 +580,29 @@ const PATTERNS = [
   ['plotOn', /^OK {3}plot (\w+) (\d+) Hz: (.+)$/],
   ['status', new RegExp(`^\\[\\s*(${NUM})\\] (\\w+) (\\w+) x=(\\S+) y=(\\S+) yaw=(\\S+) tgt=(\\S+) err=(\\S+) v=(\\S+)/(\\S+)/(\\S+) rpm\\(t/m\\) LF (-?\\d+)/(-?\\d+) RF (-?\\d+)/(-?\\d+) LR (-?\\d+)/(-?\\d+) RR (-?\\d+)/(-?\\d+)(?: \\| (waiting|fault):\\s*(.*))?$`)],
   ['agv', /^\s+AGV state=(\d+) err=(\d+) leg=(\d+) covered=(\S+) field=\((\S+),(\S+)\) residual=(\S+)mm$/],
-  ['comp', /^COMP pose=\((-?\d+),(-?\d+),(\S+)\) lidar=(\w+) (\S+)Hz pts=(\d+) used=(\d+) clu=(\d+) obs=(\d+) rs=(\d+)\/(\d+) \| vision=(\w+) mode=(\d+) mat=(\d+) ring=(\d+)(\(aligned\))? crc=(\d+) \| task=(\S+) rej=(\d+) scan=(\d+)\/(\d+)$/],
+  ['pose', /^\s+POSE \((\S+),(\S+),(\S+)\)$/],
+  ['compLidar', /^COMP lidar=(\w+) (\S+)Hz revs=(\d+)\/(\d+) pts=(\d+) used=(\d+) clu=(\d+) rs=(\d+)\/(\d+)$/],
+  ['compReading', /^COMP task=none rej=(\d+) scan=(\d+)\/(\d+)$/],
+  ['compVision', /^COMP vision=(\w+) mode=(\d+) mat=(\d+) ring=(\d+)(\(aligned\))? crc=(\d+)$/],
+  ['scanDone', /^COMP scan done: (\d+) obstacles/],
+  ['scanFailed', /^COMP scan failed/],
+  ['scanRestart', /^OK {3}scan restarted$/],
   ['obstacleNew', /^COMP obstacle #\d+ at \((-?\d+),(-?\d+)\)/],
   ['obstacleItem', /^ {2}#\d+ \((-?\d+),(-?\d+)\)$/],
-  ['obstacleEnd', /^OK {3}(\d+) obstacles$/],
-  ['obstaclesCleared', /^OK {3}obstacles cleared$/],
+  ['obstacleEnd', /^OK {3}(\d+) obstacles, scan (\w+)$/],
   ['taskOk', /^COMP task (\d\d\d\+\d\d\d\+\d\d\d\+\d\d\d) from (\w+)/],
+  ['taskNone', /^COMP task none$/],
+  ['taskCleared', /^OK {3}task cleared/],
   ['taskBad', /^COMP task rejected \((\w+)\) from (\w+): (.*)$/],
+  ['run', /^RUN (\w+)(?: (\w+))?$/],
+  ['routeList', /^ROUTE points (\d+)$/],
+  ['routePoint', /^ROUTE (\d+) (-?\d+) (-?\d+)$/],
+  ['routeEnd', /^ROUTE end$/],
+  ['routeState', /^ROUTE (\w+)(?: (\w+))?$/],
+  ['mode', /^OK {3}mode (\w+)$/],
+  ['poseOk', /^OK {3}pose \(/],
   ['banner', /^==== 2026AGV .*mode=(\w+) \| IMU=/],
-  ['pathDone', /^DONE path: time=(\S+)s dist=(\S+)mm max_cross=(\S+)mm max_heading=(\S+)deg$/],
+  ['pathDone', /^DONE path: time=(\S+)s dist=(\S+)mm max_cross=(\S+)mm max_heading=(\S+)deg jitter=(\d+)us loop=(\d+)us$/],
 ];
 
 function parseLine(line) {
@@ -459,7 +615,7 @@ function parseLine(line) {
 
 /* ---------- 全局状态 ---------- */
 const params = new Map();   // name -> {name,value,text,def,defText,min,max,decimals,stoppedOnly,row,...}
-const app = { port: null, reader: null, chain: Promise.resolve(), mode: '', bootMode: '', listed: false, lastRx: 0, seenAgv: false, agvState: -1, yaw: 0, moving: false, obstacles: [], obsBuffer: [], pose: null, picked: null, task: '', sawGarbage: 0 };
+const app = { port: null, reader: null, chain: Promise.resolve(), mode: '', workspace: 'debug', lastRx: 0, agvState: -1, yaw: 0, moving: false, running: false, obstacles: [], obsBuffer: [], pose: null, trace: [], scanPoints: [], picked: null, task: '', taskSource: '', scan: '', route: null, sawGarbage: 0 };
 const SAVED_KEY = 'agv-console.params';
 
 function loadSaved() {
@@ -510,12 +666,15 @@ async function connect() {
     return;
   }
   app.port = port;
-  Object.assign(app, { sawGarbage: 0, lastRx: 0, listed: false, bootMode: '', seenAgv: false, agvState: -1, moving: false });
+  Object.assign(app, { sawGarbage: 0, lastRx: 0, moving: false });
+  resetRun();
+  resetParams();
   setConnected(true);
   readLoop(port);
   hideNotice();
   send('/plot off');
   send('D5');
+  send('/mode');
   send('/list');
   setTimeout(() => {
     if (app.port === port && !app.lastRx)
@@ -568,9 +727,10 @@ function setConnected(on) {
   $('connect').classList.toggle('primary', !on);
   $('baud').disabled = on;
   setPill('linkPill', on ? '已连接' : '未连接', on ? 'ok' : '');
+  $('taskSubmit').textContent = on ? '当作扫到' : '预览';
+  setMode('');
   if (!on) {
     setPill('statePill', '底盘 --', '');
-    setPill('modePill', '模式 --', '');
     setPlotActive(null);
     updateParamEnabled();
   }
@@ -579,7 +739,7 @@ function setConnected(on) {
 function setPill(id, text, cls) {
   const p = $(id);
   p.textContent = text;
-  p.className = 'pill' + (cls ? ' ' + cls : '');
+  p.className = 'pill' + (cls ? ' ' + cls : '') + (p.classList.contains('comp-only') ? ' comp-only' : '');
 }
 
 function showNotice(text, buttons = []) {
@@ -606,7 +766,13 @@ function handleLine(raw) {
     case 'plot': onPlotSample(m[1]); if ($('showPlot').checked) logLine(line, 'note'); return;
     case 'status': onStatus(m); if ($('showStatus').checked) logLine(line, 'note'); return;
     case 'agv': onAgv(m); if ($('showStatus').checked) logLine(line, 'note'); return;
-    case 'comp': onComp(m); if ($('showStatus').checked) logLine(line, 'note'); return;
+    case 'pose': setPose(Number(m[1]), Number(m[2]), Number(m[3])); if ($('showStatus').checked) logLine(line, 'note'); return;
+    case 'compLidar': onCompLidar(m); if ($('showStatus').checked) logLine(line, 'note'); return;
+    case 'compReading': onCompReading(m); if ($('showStatus').checked) logLine(line, 'note'); return;
+    case 'compVision': onCompVision(m); if ($('showStatus').checked) logLine(line, 'note'); return;
+    case 'routeList': app.route.buffer = []; app.route.expected = Number(m[1]); if ($('showStatus').checked) logLine(line, 'note'); return;
+    case 'routePoint': onRoutePoint(Number(m[1]), Number(m[2]), Number(m[3])); if ($('showStatus').checked) logLine(line, 'note'); return;
+    case 'routeEnd': onRouteEnd(); if ($('showStatus').checked) logLine(line, 'note'); return;
     case 'param': onParam(m); break;
     case 'setOk': onSetOk(m); break;
     case 'setErr': onSetFail(m[1], line.slice(5)); break;
@@ -616,13 +782,26 @@ function handleLine(raw) {
     case 'plotOn': onPlotStart(m[1], Number(m[2]), m[3].split(',')); break;
     case 'obstacleNew': addObstacle(Number(m[1]), Number(m[2])); break;
     case 'obstacleItem': app.obsBuffer.push([Number(m[1]), Number(m[2])]); break;
-    case 'obstacleEnd': app.obstacles = app.obsBuffer; app.obsBuffer = []; drawMap(); break;
-    case 'obstaclesCleared': app.obstacles = []; drawMap(); break;
-    case 'taskOk': $('taskMsg').textContent = ''; setTask(m[1]); break;
+    case 'obstacleEnd': app.obstacles = app.obsBuffer; app.obsBuffer = []; setScan(m[2]); break;
+    case 'scanDone': setScan('done'); break;
+    case 'scanFailed': setScan('failed'); break;
+    case 'scanRestart':
+      app.obstacles = [];
+      if (app.pose) app.scanPoints.push([app.pose[0], app.pose[1]]);
+      setScan('running');
+      break;
+    case 'taskOk': $('taskMsg').textContent = ''; setTask(m[1], m[2]); break;
+    case 'taskNone': case 'taskCleared': setTask('', ''); break;
     case 'taskBad': $('taskMsg').textContent = `错码（${m[1]}）：${m[3]}`; break;
+    case 'routeState': onRouteState(m[1], m[2] || ''); break;
+    case 'mode': setMode(m[1]); break;
+    case 'run': onRun(m[1], m[2] || ''); break;
+    case 'poseOk': app.trace = []; app.picked = null; drawMap(); break;
     case 'banner': onBoot(m[1]); break;
     case 'pathDone':
-      $('lastPath').textContent = `上一条路径：用时 ${m[1]} s，里程 ${m[2]} mm，最大偏线 ${m[3]} mm，最大航向误差 ${m[4]}°`;
+      document.querySelectorAll('.lastPath').forEach(p => {
+        p.textContent = `上一条路径：用时 ${m[1]} s，里程 ${m[2]} mm，最大偏线 ${m[3]} mm，最大航向误差 ${m[4]}°；控制节拍最大偏差 ${m[5]} µs，单拍最长占用 ${m[6]} µs（周期 5000 µs）`;
+      });
       break;
   }
   logLine(line, /^ERR/.test(line) ? 'err' : /^BUSY/.test(line) ? 'busy' : /^OK/.test(line) ? 'ok' : '');
@@ -630,35 +809,101 @@ function handleLine(raw) {
 
 function onBoot(mode) {
   logLine('固件重启了，重新读取参数', 'note');
-  app.bootMode = mode;
-  app.seenAgv = false;
   app.agvState = -1;
-  app.pose = null;
-  app.obstacles = [];
-  drawMap();
-  updateMode();
+  resetRun();
+  resetParams();
+  setMode(mode);
   send('D5');
   send('/list');
   if (plot.group) send(`/plot ${plot.group} ${plot.hz}`);
 }
 
+/* 这一局的数据：连接或固件重启时清掉，断开时留着看。 */
+function resetRun() {
+  Object.assign(app, { obstacles: [], obsBuffer: [], pose: null, trace: [], scanPoints: [], picked: null, scan: '', route: { state: 'none', why: '', points: [], buffer: null, expected: 0, retried: false } });
+  setTask('', '');
+  renderScan();
+  renderRoute();
+  onRun('', '');
+}
+
+function resetParams() {
+  params.clear();
+  $('paramBody').replaceChildren();
+}
+
 const MODE_NAMES = { COMMAND: '指令', SURVEY: '巡检', COMPETITION: '比赛' };
-/* 开机信息直接写了模式。中途连上时看不到开机信息，等 /list 读完再推断：比赛模式才有雷达参数，
-   巡检和比赛模式的状态行后面都跟一行 AGV。 */
-function updateMode() {
-  app.mode = app.bootMode || (!app.listed ? '' : params.has('lidar_x') ? 'COMPETITION' : app.seenAgv ? 'SURVEY' : 'COMMAND');
+/* 每个模式能用的工作区：调试台三个模式共用。没连接时都能打开看。 */
+const WORKSPACES = { '': ['debug', 'task', 'map'], COMMAND: ['debug'], SURVEY: ['debug', 'map'], COMPETITION: ['debug', 'task', 'map'] };
+const TAB_HINTS = {
+  '': '没连接：三个工作区都能打开看，连上后按固件的模式显示',
+  COMMAND: '指令模式只用调试台；任务物料和地图路径要烧比赛模式固件（AGV_MODE=2）',
+  SURVEY: '巡检模式没有任务码，地图上是整圈路线',
+  COMPETITION: '',
+};
+
+function showWorkspace(name) {
+  app.workspace = name;
+  for (const [ws, id] of [['debug', 'wsDebug'], ['task', 'wsTask'], ['map', 'wsMap']])
+    $(id).classList.toggle('active', ws === name);
+  document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.ws === name)));
+  plot.dirty = true;
+  drawMap();
+}
+
+function updateModePill() {
   const survey = app.mode === 'SURVEY' && app.agvState >= 0;
   setPill('modePill', '模式 ' + (MODE_NAMES[app.mode] || '--') + (survey ? ' · ' + (AGV_STATES[app.agvState] || app.agvState) : ''),
     !app.mode ? '' : survey && app.agvState === AGV_FAULT ? 'bad' : survey && app.agvState === AGV_STOPPED ? 'warn' : 'ok');
-  if (document.body.dataset.mode !== app.mode) {
-    document.body.dataset.mode = app.mode;
-    drawMap();
-    if (app.mode === 'COMPETITION') send('/obs');
-  }
+}
+
+/* 模式由固件决定：连接时问 /mode，重启时看开机信息。 */
+function setMode(mode) {
+  const changed = mode !== app.mode;
+  app.mode = mode;
+  document.body.dataset.mode = mode;
+  updateModePill();
+  if (!(WORKSPACES[mode] || WORKSPACES['']).includes(app.workspace)) showWorkspace('debug');
+  $('tabHint').textContent = TAB_HINTS[mode] ?? '';
+  updateLocks();
+  renderRoute();
+  if (!changed) return;
+  /* 识别结果固件只主动说一次，中途连上的要问一次。 */
+  if (mode === 'COMPETITION') { send('/run'); send('/obs'); send('/task'); send('/route'); }
+  if (mode === 'SURVEY') send('/route');
+}
+
+/* 比赛流程运行中固件只接受急停（规则禁止遥控），这里把改东西的控件一起锁住。 */
+function updateLocks() {
+  document.querySelectorAll('.run-lock').forEach(b => { b.disabled = !app.port || app.running; });
   document.querySelectorAll('[data-move],[data-turn],#headingZero,#wheelTest').forEach(b => {
-    b.disabled = !app.port || app.mode === 'SURVEY';
-    b.title = app.mode === 'SURVEY' ? '巡检模式路线固定，不接受手动运动' : '';
+    b.disabled = !app.port || app.mode === 'SURVEY' || app.running;
+    b.title = app.mode === 'SURVEY' ? '巡检模式路线固定，不接受手动运动' : app.running ? '比赛流程运行中，只能急停' : '';
   });
+  $('startBtn').disabled = !app.port || app.running;
+  $('taskSubmit').disabled = app.running;
+  $('visionColor').disabled = !app.port || app.running;
+  updateParamEnabled();
+}
+
+const RUN_STATES = { idle: '等启动', scan: '停车扫描', plan: '规划路线', move: '开往下一处', wait: '等任务码', done: '开局完成', stopped: '已停止', failed: '失败' };
+const RUN_WHY = { route: '去不了二维码板前', task: '读不到任务码', chassis: '底盘故障' };
+
+function onRun(state, why) {
+  /* 新的一次流程开始：上一次的结果作废。中途连上时 /obs 紧跟着会把障碍物补回来。 */
+  if (state === 'scan' && !app.running) Object.assign(app, { obstacles: [], scanPoints: [], trace: [] });
+  app.running = ['scan', 'plan', 'move', 'wait'].includes(state);
+  setPill('runPill', '流程 ' + (state ? RUN_STATES[state] || state : '--') + (why ? '：' + (RUN_WHY[why] || why) : ''),
+    state === 'failed' ? 'bad' : state === 'stopped' ? 'warn' : app.running || state === 'done' ? 'ok' : '');
+  if (state === 'scan') {
+    if (app.pose) app.scanPoints.push([app.pose[0], app.pose[1]]);
+    setScan('running');
+  } else if (app.scan === 'running' && state !== 'done') {
+    setText('cLidar', '暂停，开动时不读');
+  }
+  if (state === 'failed' || state === 'done') $('routeMsg').className = 'alarm';
+  updateLocks();
+  drawMap();
 }
 
 /* ---------- 参数 ---------- */
@@ -776,8 +1021,8 @@ function renderParam(p) {
   p.row.classList.toggle('changed', p.value !== p.def);
   p.row.classList.toggle('pending', p.pending);
   p.messageEl.textContent = p.message;
-  p.resetBtn.disabled = !app.port || p.value === p.def;
-  const locked = !app.port || (p.stoppedOnly && app.moving);
+  p.resetBtn.disabled = !app.port || app.running || p.value === p.def;
+  const locked = !app.port || app.running || (p.stoppedOnly && app.moving);
   p.number.disabled = p.slider.disabled = locked;
   if (p.stoppedOnly && !app.port) p.resetBtn.disabled = true;
 }
@@ -827,8 +1072,6 @@ function onSetFail(name, text) {
 
 /* 读完 /list 后，检查这台电脑上有没有存过、但固件里没生效的值（固件断电就恢复默认）。 */
 function afterList() {
-  app.listed = true;
-  updateMode();
   const saved = loadSaved();
   const lines = Object.entries(saved)
     .filter(([name, text]) => params.has(name) && params.get(name).text !== text)
@@ -890,7 +1133,7 @@ function onStatus(m) {
   app.yaw = Number(m[6]);
   setPill('statePill', `底盘 ${state} · ${mode}`, state === 'READY' ? 'ok' : state === 'FAULT' ? 'bad' : 'warn');
   const moving = mode !== 'STOP';
-  if (moving !== app.moving) { app.moving = moving; updateParamEnabled(); }
+  if (moving !== app.moving) { app.moving = moving; updateParamEnabled(); renderRoute(); }
   $('sTime').textContent = m[1];
   $('sX').textContent = m[4];
   $('sY').textContent = m[5];
@@ -926,10 +1169,8 @@ const AGV_DONE = 6, AGV_STOPPED = 7, AGV_FAULT = 8;
 const AGV_ERRORS = ['', '底盘一直没有就绪', '底盘故障或路径被拒绝', '路线走不通', '偏线过大或位置越界', '整圈超时', '地图在运行中变了'];
 
 function onAgv(m) {
-  app.seenAgv = true;
   app.agvState = Number(m[1]);
-  updateMode();
-  if (app.mode !== 'SURVEY') return;
+  updateModePill();
   const x = Number(m[5]), y = Number(m[6]);
   setText('aState', AGV_STATES[app.agvState] || m[1]);
   setText('aLeg', m[3]);
@@ -945,57 +1186,145 @@ function onAgv(m) {
   alarm.className = 'alarm' + (fault ? ' fault' : app.agvState === AGV_STOPPED ? ' wait' : '');
   alarm.textContent = fault ? `巡检故障：${AGV_ERRORS[Number(m[2])] || '错误码 ' + m[2]}。复位单片机后重新开始。`
     : app.agvState === AGV_STOPPED ? '巡检已停止。复位单片机后重新开始。' : '';
-  if (x || y) { // 开车前还没有场地坐标，固件报 (0,0)
-    app.pose = [x, y, app.yaw];
-    drawMap();
-  }
+  setText('rState', AGV_STATES[app.agvState] || m[1]);
+  if (x || y) setPose(x, y, app.yaw); // 开车前还没有场地坐标，固件报 (0,0)
 }
 
-function onComp(m) {
-  app.pose = [Number(m[1]), Number(m[2]), Number(m[3])];
-  setText('cLidar', `${m[4]} ${m[5]} Hz`);
-  setText('cPts', `${m[6]} / ${m[7]}`);
-  setText('cRs', `${m[10]} / ${m[11]}`);
-  setText('cVision', m[12] === 'ON' ? '在线' : '离线');
-  setText('cMat', m[14]);
-  setText('cRing', m[15] === '0' ? '没看到' : m[16] ? '已对准' : '看到了');
-  setText('cCrc', m[17]);
-  setText('cRej', m[19]);
-  setText('cScan', `${m[20]} / ${m[21]}`);
-  $('obsCount').textContent = '障碍物 ' + m[9];
-  document.querySelectorAll('#visionModes button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === m[13])));
-  if (m[18] !== 'none' && m[18] !== app.task) setTask(m[18]);
+/* 轨迹只在车真的动了才加点；最多留这么多点，5 Hz 约一刻钟。 */
+const TRACE_LIMIT = 4000;
+
+function setPose(x, y, heading) {
+  app.pose = [x, y, heading];
+  setText('cX', x.toFixed(1));
+  setText('cY', y.toFixed(1));
+  setText('cH', heading.toFixed(2));
+  const last = app.trace[app.trace.length - 1];
+  if (!last || Math.hypot(last[0] - x, last[1] - y) >= 3) {
+    app.trace.push([x, y]);
+    if (app.trace.length > TRACE_LIMIT) app.trace.shift();
+  }
   drawMap();
 }
 
-/* ---------- 任务码 ---------- */
-const MATERIALS = { 1: ['红', '#d9352f'], 2: ['黄', '#f2c200'], 3: ['蓝', '#1f5fd0'], 4: ['绿', '#1f9d4d'], 5: ['黑', '#1b1b1b'], 6: ['浅蓝', '#6ec6ef'] };
+/* ---------- 雷达扫描：固件开局扫一次，输出结果后关掉雷达 ---------- */
+function onCompLidar(m) {
+  if (!app.scan) app.scan = 'running';
+  setText('cLidar', `${m[1]} ${m[2]} Hz`);
+  setText('cRevs', `${m[3]} / ${m[4]}`);
+  setText('cPts', `${m[5]} / ${m[6]}`);
+  setText('cRs', `${m[8]} / ${m[9]}`);
+  renderScan();
+}
 
-function setTask(code) {
-  app.task = code;
-  $('taskCode').textContent = code;
-  const g = code.split('+');
-  const body = $('taskTable');
+function setScan(state) {
+  app.scan = state;
+  if (state === 'done') setText('cLidar', '已关闭');
+  if (state === 'failed') setText('cLidar', '没有数据');
+  if (state === 'done' || state === 'failed') setText('cRevs', '--');
+  renderScan();
+  drawMap();
+}
+
+function renderScan() {
+  const text = { idle: '还没扫', running: '扫描中', done: '扫完了', failed: '没扫成' };
+  setText('scanState', text[app.scan] || '--');
+  $('scanState').classList.toggle('err-text', app.scan === 'failed');
+  setText('obsCount', app.scan === 'done' || app.obstacles.length ? String(app.obstacles.length) : '--');
+  const body = $('obsList').tBodies[0];
   body.replaceChildren();
-  if (g.length !== 4) return;
-  /* 第二批在暂存区码垛到第一批同色物料上：环号按颜色查。 */
-  const storage2 = [...g[2]].map(c => g[1][g[0].indexOf(c)]);
-  [[g[0], g[1], g[1]], [g[2], g[3], storage2.join('')]].forEach(([colors, rough, storage], i) => {
+  app.obstacles.forEach(([x, y], i) => {
     const tr = el('tr');
-    const order = el('td');
-    order.style.textAlign = 'left';
-    const chips = el('div', 'chips');
-    for (const c of colors) {
-      const info = MATERIALS[c] || ['?', '#888'];
-      const chip = el('span', 'chip');
-      const dot = el('i');
-      dot.style.background = info[1];
-      chip.append(dot, document.createTextNode(info[0]));
-      chips.append(chip);
+    tr.append(el('td', '', `#${i + 1}`), el('td', '', `X ${x}`), el('td', '', `Y ${y}`));
+    body.append(tr);
+  });
+}
+
+function onCompVision(m) {
+  setText('cVision', m[1] === 'ON' ? '在线' : '离线');
+  setText('cMat', m[3]);
+  setText('cRing', m[4] === '0' ? '没看到' : m[5] ? '已对准' : '看到了');
+  setText('cCrc', m[6]);
+  document.querySelectorAll('#visionModes button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === m[2])));
+}
+
+function onCompReading(m) {
+  setText('cRej', m[1]);
+  setText('cScan', `${m[2]} / ${m[3]}`);
+}
+
+/* ---------- 任务码：固件认出第一个合法的码，输出一次就不再读 ---------- */
+const MATERIALS = { 1: ['红', '#d9352f'], 2: ['黄', '#f2c200'], 3: ['蓝', '#1f5fd0'], 4: ['绿', '#1f9d4d'], 5: ['黑', '#1b1b1b'], 6: ['浅蓝', '#6ec6ef'] };
+const TASK_SOURCES = { scanner: '扫码模块', camera: '相机', console: '手动输入', preview: '本地预览，没有发给车' };
+
+function materialChip(color) {
+  const info = MATERIALS[color] || ['?', '#888'];
+  const chip = el('span', 'chip');
+  const dot = el('i');
+  dot.style.background = info[1];
+  chip.append(dot, document.createTextNode(info[0]));
+  return chip;
+}
+
+function materialCard(index, color, rough, storage) {
+  const info = MATERIALS[color] || ['?', '#888'];
+  const card = el('div', 'card');
+  const swatch = el('i', 'swatch');
+  swatch.style.background = info[1];
+  card.append(swatch, el('b', '', `${index}. ${info[0]}`), el('span', '', `粗加工区 ${rough} 号环`), el('span', '', `暂存区 ${storage} 号环`));
+  return card;
+}
+
+/* 和固件 task_code.c 同样的规则，没连车时用来预览。 */
+function checkTask(code) {
+  const m = /^(\d{3})\+(\d{3})\+(\d{3})\+(\d{3})$/.exec(code);
+  if (!m) return '格式不对，要像 156+123+516+231';
+  const sorted = text => [...text].sort().join('');
+  const [, first, firstRings, second, secondRings] = m;
+  if (/[^1-6]/.test(first + second) || new Set(first).size < 3 || new Set(second).size < 3) return '颜色要是 1~6，同一批不能重复';
+  if (sorted(firstRings) !== '123' || sorted(secondRings) !== '123') return '环号要是 1、2、3 各一次';
+  if (sorted(first) !== sorted(second)) return '第二批的颜色要和第一批相同，暂存区才能码垛';
+  return '';
+}
+
+function renderTaskState() {
+  const state = app.task ? `已定下来，不再读码（${TASK_SOURCES[app.taskSource] || app.taskSource}）` : app.port ? '正在读码' : '没连接';
+  setText('taskState', state);
+  setText('cScanState', app.task ? '已关闭' : app.port ? '读码中' : '--');
+}
+
+function setTask(code, source) {
+  app.task = code;
+  app.taskSource = source;
+  $('taskCode').textContent = code || '--';
+  $('taskEmpty').hidden = Boolean(code);
+  $('taskDetail').hidden = !code;
+  renderTaskState();
+  if (!code) return;
+  const [first, firstRings, second, secondRings] = code.split('+');
+  /* 第二批在暂存区码垛到第一批同色物料上：环号按颜色查。 */
+  const stacked = [...second].map(c => firstRings[first.indexOf(c)]).join('');
+  $('needColors').replaceChildren(...[...first].map(materialChip));
+  const batches = $('batches');
+  batches.replaceChildren();
+  [['第一批', first, firstRings, firstRings, '原料区 → 粗加工区 → 暂存区'],
+   ['第二批', second, secondRings, stacked, '原料区 → 粗加工区 → 暂存区（码在第一批同色物料上）']].forEach(([name, colors, rough, storage, flow]) => {
+    const title = el('div', 'batch-title', name);
+    title.append(el('span', 'flow', flow));
+    const cards = el('div', 'cards');
+    [...colors].forEach((c, i) => cards.append(materialCard(i + 1, c, rough[i], storage[i])));
+    batches.append(title, cards);
+  });
+  const body = $('ringTable').tBodies[0];
+  body.replaceChildren();
+  [['粗加工区 第一批', first, firstRings], ['粗加工区 第二批', second, secondRings],
+   ['暂存区 第一批', first, firstRings], ['暂存区 第二批（码垛）', second, stacked]].forEach(([name, colors, rings]) => {
+    const tr = el('tr');
+    tr.append(el('td', '', name));
+    for (const ring of '123') {
+      const td = el('td');
+      td.append(materialChip(colors[rings.indexOf(ring)]));
+      tr.append(td);
     }
-    order.append(chips);
-    tr.append(el('td', '', String(i + 1)), order, el('td', 'num', [...rough].join(' ')), el('td', 'num', [...storage].join(' ')));
-    tr.firstChild.style.textAlign = 'right';
     body.append(tr);
   });
 }
@@ -1254,14 +1583,78 @@ const FIELD = 2400;
 
 function addObstacle(x, y) {
   if (!app.obstacles.some(o => Math.hypot(o[0] - x, o[1] - y) < 5)) app.obstacles.push([x, y]);
+  renderScan();
+  drawMap();
+}
+
+const ROUTE_STATES = { none: '没有路线', planning: '规划中', ready: '规划好了', following: '行驶中', done: '到了', stopped: '停下了', failed: '规划失败' };
+const ROUTE_WHY = {
+  goal: '目标点放不下车：在黄色区域里、太靠边或挨着障碍物。',
+  start: '车现在的位置放不下车，先设定位姿。',
+  heading: '车头要接近 0°、90°、180° 或 -90°，先转正。',
+  nopath: '走不过去，路都被挡住了。',
+  long: '路线拐点太多。',
+  moved: '规划之后车动过，要重新规划。',
+  blocked: '路线被障碍物挡住了，要重新规划。',
+  cross: '偏离路线太多，已经停车。',
+  chassis: '底盘现在不接受路径。',
+};
+
+function onRouteState(state, why) {
+  const route = app.route;
+  route.state = state;
+  route.why = why;
+  route.retried = false;
+  if (state === 'none' || state === 'planning' || state === 'failed') route.points = [];
+  if (state === 'following' && !app.running) app.trace = []; // 比赛流程分好几段走，轨迹要连着
+  renderRoute();
+}
+
+function onRoutePoint(index, x, y) {
+  const buffer = app.route.buffer;
+  if (buffer && index === buffer.length) buffer.push([x, y]);
+}
+
+function onRouteEnd() {
+  const route = app.route;
+  if (route.buffer && route.buffer.length === route.expected) route.points = route.buffer;
+  else if (!route.retried) { route.retried = true; send('/route'); } // 串口上丢了一行，再要一次
+  route.buffer = null;
+  renderRoute();
+}
+
+function routeLength(points) {
+  let length = 0;
+  for (let i = 1; i < points.length; ++i) length += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+  return length;
+}
+
+function renderRoute() {
+  const route = app.route;
+  if (!route) return;
+  /* 比赛流程只走路线的第一段，走完这段就到下一步了。 */
+  if (app.mode !== 'SURVEY') setText('rState', app.running && route.state === 'done' ? '这段走完了' : ROUTE_STATES[route.state] || route.state);
+  setText('rPoints', route.points.length ? String(route.points.length) : '--');
+  setText('rLength', route.points.length ? `${Math.round(routeLength(route.points))} mm` : '--');
+  const message = $('routeMsg');
+  const goal = route.points[route.points.length - 1];
+  const bad = route.state === 'failed' || (route.state === 'stopped' && route.why);
+  message.className = 'alarm' + (bad ? ' fault' : route.state === 'stopped' ? ' wait' : '');
+  message.textContent = bad ? (ROUTE_WHY[route.why] || route.why) : route.state === 'stopped' ? '没走到就停了。重新规划后可以接着走。' : '';
+  if (route.state === 'done' && goal && app.pose && !app.running) {
+    message.className = 'alarm wait';
+    message.textContent = `离目标 ${Math.hypot(app.pose[0] - goal[0], app.pose[1] - goal[1]).toFixed(1)} mm（按里程计算）`;
+  }
+  $('routeGo').disabled = !app.port || route.state !== 'ready' || app.moving;
   drawMap();
 }
 
 function drawMap() {
   const canvas = $('map');
-  const size = canvas.clientWidth;
-  if (!size) return; // 面板没显示
+  const size = Math.min($('mapWrap').clientWidth, $('mapWrap').clientHeight);
+  if (!size) return; // 工作区没显示
   const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = canvas.style.height = size + 'px';
   canvas.width = canvas.height = Math.round(size * dpr);
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -1281,7 +1674,7 @@ function drawMap() {
   box(2100, 0, 300, 300, '#3b6fd4');
   box(910, 0, 580, 150, '#f7f7f4');
   box(0, 910, 150, 580, '#f7f7f4');
-  ctx.font = '10px system-ui, "Microsoft YaHei", sans-serif';
+  ctx.font = `${Math.max(10, Math.round(size / 50))}px system-ui, "Microsoft YaHei", sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   label('启停 1', 2250, 2250, '#fff');
@@ -1318,6 +1711,48 @@ function drawMap() {
   ctx.fillStyle = '#3a3a37';
   ctx.fillText('二维码', 0, 0);
   ctx.restore();
+
+  /* 规划路线在下面，实际轨迹压在上面，两条线重合时也都看得出来。 */
+  const polyline = points => {
+    ctx.beginPath();
+    points.forEach(([x, y], i) => (i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))));
+    ctx.stroke();
+  };
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  const route = app.route ? app.route.points : [];
+  if (route.length) {
+    ctx.strokeStyle = 'rgba(255,255,255,.85)';
+    ctx.lineWidth = 6;
+    polyline(route);
+    ctx.strokeStyle = '#d9480f';
+    ctx.lineWidth = 3;
+    polyline(route);
+    route.forEach(([x, y], i) => {
+      const end = i === route.length - 1;
+      ctx.fillStyle = end ? '#d9480f' : '#fff';
+      ctx.strokeStyle = '#d9480f';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(X(x), Y(y), end ? 6 : 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+  }
+  if (app.trace.length > 1) {
+    ctx.strokeStyle = '#1f5fd0';
+    ctx.lineWidth = 1.5;
+    polyline(app.trace);
+  }
+  for (const [x, y] of app.scanPoints) {
+    ctx.save();
+    ctx.translate(X(x), Y(y));
+    ctx.rotate(Math.PI / 4);
+    ctx.strokeStyle = '#6250d6';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-5, -5, 10, 10);
+    ctx.restore();
+  }
 
   for (const [x, y] of app.obstacles) {
     ctx.fillStyle = '#111';
@@ -1427,8 +1862,9 @@ $('plot').addEventListener('pointermove', e => {
   plot.dirty = true;
 });
 $('plot').addEventListener('pointerleave', () => { plot.hover = null; plot.dirty = true; });
-new ResizeObserver(() => { plot.dirty = true; drawMap(); }).observe($('plotWrap'));
-new ResizeObserver(() => drawMap()).observe($('sideColumn'));
+new ResizeObserver(() => { plot.dirty = true; }).observe($('plotWrap'));
+new ResizeObserver(() => drawMap()).observe($('mapWrap'));
+$('tabs').addEventListener('click', e => { if (e.target.dataset.ws) showWorkspace(e.target.dataset.ws); });
 
 $('logForm').addEventListener('submit', e => {
   e.preventDefault();
@@ -1461,34 +1897,51 @@ $('wheelTest').addEventListener('click', () => {
   if (confirm('单轮测试会让四个轮子依次转动，车要架起来，轮子全部离地。继续？')) send('W');
 });
 
-$('obsRefresh').addEventListener('click', () => send('/obs'));
-$('obsClear').addEventListener('click', () => send('/obs clear'));
+$('scanBtn').addEventListener('click', () => { app.scanPoints = []; send('/scan'); });
+$('startBtn').addEventListener('click', () => {
+  if (confirm('车会自己开动：先在这里扫描，再去二维码板前，再往场地中央走。确认车在启停区、周围没人？')) send('/start');
+});
 $('map').addEventListener('click', e => {
-  if (app.mode !== 'COMPETITION') return;
+  if (app.mode === 'SURVEY') return;
   const rect = $('map').getBoundingClientRect();
   const x = Math.round(((e.clientX - rect.left) / rect.width) * FIELD);
   const y = Math.round((1 - (e.clientY - rect.top) / rect.height) * FIELD);
-  $('poseX').value = x;
-  $('poseY').value = y;
+  $('pickX').value = x;
+  $('pickY').value = y;
   app.picked = [x, y];
   drawMap();
 });
-$('poseSet').addEventListener('click', () => {
-  send(`/pose ${Number($('poseX').value)} ${Number($('poseY').value)} ${Number($('poseH').value)}`);
+$('map').addEventListener('pointermove', e => {
+  const rect = $('map').getBoundingClientRect();
+  setText('mapHover', `X ${Math.round(((e.clientX - rect.left) / rect.width) * FIELD)}  Y ${Math.round((1 - (e.clientY - rect.top) / rect.height) * FIELD)}`);
+});
+$('map').addEventListener('pointerleave', () => setText('mapHover', ''));
+$('routePlan').addEventListener('click', () => {
+  send(`/route ${Math.round(Number($('pickX').value))} ${Math.round(Number($('pickY').value))}`);
   app.picked = null;
 });
+$('routeGo').addEventListener('click', () => send('/route go'));
+$('traceClear').addEventListener('click', () => { app.trace = []; drawMap(); });
+$('poseSet').addEventListener('click', () => {
+  send(`/pose ${Number($('pickX').value)} ${Number($('pickY').value)} ${Number($('pickH').value)}`);
+});
 document.querySelectorAll('[data-zone]').forEach(b => b.addEventListener('click', () => {
-  $('poseX').value = 2250;
-  $('poseY').value = b.dataset.zone;
-  $('poseH').value = 0;
+  $('pickX').value = 2250;
+  $('pickY').value = b.dataset.zone;
+  $('pickH').value = 0;
   app.picked = [2250, Number(b.dataset.zone)];
   drawMap();
 }));
 $('taskForm').addEventListener('submit', e => {
   e.preventDefault();
   const text = $('taskInput').value.trim();
-  if (text) send('/task ' + text);
+  if (!text) return;
+  if (app.port) { send('/task ' + text); return; }
+  const problem = checkTask(text);
+  $('taskMsg').textContent = problem;
+  if (!problem) setTask(text, 'preview');
 });
+$('taskClear').addEventListener('click', () => send('/task clear'));
 $('visionModes').addEventListener('click', e => {
   if (e.target.dataset.mode !== undefined) send(`/vision ${e.target.dataset.mode} ${$('visionColor').value}`);
 });
@@ -1504,6 +1957,7 @@ if ('serial' in navigator) {
   $('connect').disabled = true;
   showNotice(`这个页面用不了网页串口。请用电脑版 Chrome 或 Edge；已经是的话，${SERVE_HINT}`);
 }
+resetRun();
 readColors();
 setConnected(false);
 setPlotActive(null);

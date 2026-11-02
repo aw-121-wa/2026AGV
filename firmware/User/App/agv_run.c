@@ -3,6 +3,7 @@
 #include "astar.h"
 #include "survey.h"
 #include "chassis.h"
+#include "chassis_telemetry.h"
 #include "user_math.h"
 #include <math.h>
 
@@ -69,6 +70,24 @@ static void Pose(void)
     float dx = chassis.pos_x - origin_x, dy = chassis.pos_y - origin_y;
     agv.x = home.x + cs * dx + sn * dy;
     agv.y = home.y - sn * dx + cs * dy;
+}
+
+/* 第 index 个路线点的场地坐标：0 是出发点，后面是 tour 换算回场地系。 */
+static MapPoint TourPoint(unsigned index)
+{
+    if (!index)
+        return home;
+    float dx = tour[index - 1U].x - origin_x, dy = tour[index - 1U].y - origin_y;
+    return (MapPoint){(int32_t)lroundf(home.x + cs * dx + sn * dy),
+                      (int32_t)lroundf(home.y - sn * dx + cs * dy)};
+}
+
+void Agv_RouteReport(void)
+{
+    if (executing)
+        ChassisTelemetry_SendRoute(tour_count + 1U, TourPoint);
+    else
+        ChassisTelemetry_Puts("ROUTE none\r\n");
 }
 
 /* 校验一段直线移动并追加到连续路径：先做碰撞检查，再换算成底盘系航点。 */
@@ -286,6 +305,7 @@ void Agv_Tick(void)
                     exec_since = now;
                     executing = 1;
                     agv.state = AGV_DRIVE;
+                    Agv_RouteReport();
                 }
                 else if (result != HAL_BUSY)
                     Fail(AGV_ERR_CHASSIS);

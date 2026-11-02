@@ -7,6 +7,8 @@
 #include <string.h>
 #if AGV_MODE == AGV_MODE_COMPETITION
 #include "competition.h"
+#elif AGV_MODE == AGV_MODE_SURVEY
+#include "agv_run.h"
 #endif
 
 #define CONSOLE_ARGS 4U // 最长的命令 /pose x y heading
@@ -101,10 +103,12 @@ static void CmdHelp(void)
 {
     ChassisTelemetry_Puts("---- console: lines starting with / ----\r\n"
                           "  /list [prefix]  /set <name> <value>  /reset (all, while stopped)\r\n"
-                          "  /plot <heading|speed|wheels> [1..100 Hz]  /plot off\r\n"
+                          "  /plot <heading|speed|wheels> [1..100 Hz]  /plot off  /mode\r\n"
 #if AGV_MODE == AGV_MODE_COMPETITION
-                          "  /task <code>  /vision <mode 0..3> [color 0..6]  /obs [clear]\r\n"
-                          "  /pose <x> <y> <heading>\r\n"
+                          "  /start  /run  /task [<code>|clear]  /vision <mode 0..3> [color 0..6]\r\n"
+                          "  /obs  /scan  /pose <x> <y> <heading>  /route [<x> <y>|go]\r\n"
+#elif AGV_MODE == AGV_MODE_SURVEY
+                          "  /route\r\n"
 #endif
     );
 }
@@ -213,26 +217,59 @@ static void CmdVision(const char *mode_text, const char *color_text)
     ChassisTelemetry_Printf("OK   vision mode %u color %u\r\n", (unsigned)mode, (unsigned)color);
 }
 
-static void CmdObs(const char *action)
+static void CmdTask(const char *arg)
 {
-    if (!action)
+    if (!arg)
+        Comp_TaskReport();
+    else if (strcmp(arg, "clear") == 0)
     {
-        MapPoint list[MAP_MAX_OBSTACLES];
-        unsigned n = LidarObs_List(list, MAP_MAX_OBSTACLES);
-        for (unsigned i = 0; i < n; ++i)
-            ChassisTelemetry_Printf("  #%u (%ld,%ld)\r\n", i + 1U, (long)list[i].x,
-                                    (long)list[i].y);
-        ChassisTelemetry_Printf("OK   %u obstacles\r\n", n);
+        Comp_ClearTask();
+        ChassisTelemetry_Printf("OK   task cleared, reading again\r\n");
     }
-    else if (strcmp(action, "clear") != 0)
-        ChassisTelemetry_Printf("ERR  usage: /obs [clear]\r\n");
-    else if (!IsStopped())
-        ChassisTelemetry_Printf("BUSY /obs clear can only run while stopped\r\n");
     else
-    {
-        Comp_ClearObstacles();
-        ChassisTelemetry_Printf("OK   obstacles cleared\r\n");
-    }
+        Comp_InjectTask(arg, (unsigned)strlen(arg));
+}
+
+static void CmdObs(void)
+{
+    MapPoint list[MAP_MAX_OBSTACLES];
+    unsigned n = LidarObs_List(list, MAP_MAX_OBSTACLES);
+    for (unsigned i = 0; i < n; ++i)
+        ChassisTelemetry_Printf("  #%u (%ld,%ld)\r\n", i + 1U, (long)list[i].x, (long)list[i].y);
+    ChassisTelemetry_Printf("OK   %u obstacles, scan %s\r\n", n,
+                            comp.lidar_state == COMP_LIDAR_DONE     ? "done"
+                            : comp.lidar_state == COMP_LIDAR_FAILED ? "failed"
+                            : Comp_Running() || !IsStopped()        ? "running"
+                                                                    : "idle");
+}
+
+static void CmdScan(void)
+{
+    if (!IsStopped() || Comp_Rescan() != HAL_OK)
+        ChassisTelemetry_Printf("BUSY /scan needs the chassis stopped and the pose set\r\n");
+    else
+        ChassisTelemetry_Printf("OK   scan restarted\r\n");
+}
+
+static void CmdStart(void)
+{
+    if (!IsStopped() || Comp_Start() != HAL_OK)
+        ChassisTelemetry_Printf("BUSY /start needs the chassis ready and stopped, pose set\r\n");
+}
+
+/* 流程在跑时只能看，不能改：规则禁止运行中遥控。S 不走这里，随时能停。 */
+static uint8_t RunLocked(const char *cmd, unsigned argc)
+{
+    if (!Comp_Running())
+        return 0;
+    static const char *const allowed[] = {"help", "list", "mode", "plot", "obs", "run"};
+    for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); ++i)
+        if (strcmp(cmd, allowed[i]) == 0)
+            return 0;
+    if ((strcmp(cmd, "task") == 0 || strcmp(cmd, "route") == 0) && argc == 1U) // 只是问一下
+        return 0;
+    ChassisTelemetry_Printf("BUSY the run is going, only S stops it\r\n");
+    return 1;
 }
 
 static void CmdPose(const char *x_text, const char *y_text, const char *heading_text)
@@ -243,11 +280,32 @@ static void CmdPose(const char *x_text, const char *y_text, const char *heading_
         y > (float)MAP_HEIGHT_MM || fabsf(heading) > 180.0f)
         ChassisTelemetry_Printf("ERR  usage: /pose <x 0..%d> <y 0..%d> <heading -180..180>\r\n",
                                 MAP_WIDTH_MM, MAP_HEIGHT_MM);
-    else if (Comp_SetPose(x, y, heading) != HAL_OK)
-        ChassisTelemetry_Printf("BUSY chassis not ready, heading unknown\r\n");
+    else if (!IsStopped() || Comp_SetPose(x, y, heading) != HAL_OK)
+        ChassisTelemetry_Printf("BUSY chassis moving or not ready\r\n");
     else
         ChassisTelemetry_Printf("OK   pose (%s,%s,%s)\r\n", ChassisTelemetry_Num(x, 0),
                                 ChassisTelemetry_Num(y, 0), ChassisTelemetry_Num(heading, 1));
+}
+
+static void CmdRoute(const char *first, const char *second)
+{
+    float x = 0.0f, y = 0.0f;
+    uint8_t go = first && !second && strcmp(first, "go") == 0;
+    HAL_StatusTypeDef result = HAL_OK;
+    if (!first)
+        Comp_RouteReport();
+    else if (!go && (!second || !ParseWhole(first, &x) || !ParseWhole(second, &y) || x < 0.0f ||
+                     x >= (float)MAP_WIDTH_MM || y < 0.0f || y >= (float)MAP_HEIGHT_MM))
+        ChassisTelemetry_Printf("ERR  usage: /route [<x 0..%d> <y 0..%d> | go]\r\n",
+                                MAP_WIDTH_MM - 1, MAP_HEIGHT_MM - 1);
+    else if (!IsStopped())
+        result = HAL_BUSY;
+    else
+        result = go ? Comp_RouteGo() : Comp_RoutePlan((int32_t)x, (int32_t)y);
+    if (result == HAL_BUSY)
+        ChassisTelemetry_Printf("BUSY /route needs the chassis ready and stopped, pose set\r\n");
+    else if (result != HAL_OK)
+        ChassisTelemetry_Printf("ERR  no route ready, plan one first\r\n");
 }
 #endif
 
@@ -282,6 +340,10 @@ void Console_Line(char *line)
     unsigned argc = SplitLine(line, argv);
     const char *cmd = argc ? argv[0] : "help";
 
+#if AGV_MODE == AGV_MODE_COMPETITION
+    if (RunLocked(cmd, argc))
+        return;
+#endif
     if (strcmp(cmd, "help") == 0 && argc <= 1U)
         CmdHelp();
     else if (strcmp(cmd, "list") == 0 && argc <= 2U)
@@ -292,15 +354,28 @@ void Console_Line(char *line)
         CmdReset();
     else if (strcmp(cmd, "plot") == 0 && (argc == 2U || argc == 3U))
         CmdPlot(argv[1], argc == 3U ? argv[2] : NULL);
+    else if (strcmp(cmd, "mode") == 0 && argc == 1U)
+        ChassisTelemetry_Printf("OK   mode %s\r\n", AGV_MODE_NAME);
 #if AGV_MODE == AGV_MODE_COMPETITION
-    else if (strcmp(cmd, "task") == 0 && argc == 2U)
-        Comp_InjectTask(argv[1], (unsigned)strlen(argv[1]));
+    else if (strcmp(cmd, "task") == 0 && argc <= 2U)
+        CmdTask(argc == 2U ? argv[1] : NULL);
     else if (strcmp(cmd, "vision") == 0 && (argc == 2U || argc == 3U))
         CmdVision(argv[1], argc == 3U ? argv[2] : NULL);
-    else if (strcmp(cmd, "obs") == 0 && argc <= 2U)
-        CmdObs(argc == 2U ? argv[1] : NULL);
+    else if (strcmp(cmd, "obs") == 0 && argc == 1U)
+        CmdObs();
+    else if (strcmp(cmd, "scan") == 0 && argc == 1U)
+        CmdScan();
+    else if (strcmp(cmd, "start") == 0 && argc == 1U)
+        CmdStart();
+    else if (strcmp(cmd, "run") == 0 && argc == 1U)
+        Comp_RunReport();
     else if (strcmp(cmd, "pose") == 0 && argc == 4U)
         CmdPose(argv[1], argv[2], argv[3]);
+    else if (strcmp(cmd, "route") == 0 && argc <= 3U)
+        CmdRoute(argc >= 2U ? argv[1] : NULL, argc == 3U ? argv[2] : NULL);
+#elif AGV_MODE == AGV_MODE_SURVEY
+    else if (strcmp(cmd, "route") == 0 && argc == 1U)
+        Agv_RouteReport();
 #endif
     else
         ChassisTelemetry_Printf("ERR  bad console command, /help lists them\r\n");

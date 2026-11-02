@@ -592,6 +592,8 @@ void Chassis_Update(void)
                                                      : (CHASSIS_PERIOD_US - elapsed);
         if (dev > chassis.jitter_us)
             chassis.jitter_us = dev;
+        if (chassis.mode == CHASSIS_MODE_PATH && dev > chassis_path_result.max_jitter_us)
+            chassis_path_result.max_jitter_us = dev;
     }
     chassis.dt_actual = dt;
 
@@ -653,6 +655,15 @@ void Chassis_Update(void)
 
     /* ---- 9. 下发 ---- */
     Chassis_Apply();
+}
+
+void Chassis_CycleEnd(void)
+{
+    uint32_t busy = Chassis_Micros() - s_last_us;
+    if (busy > chassis.loop_peak_us)
+        chassis.loop_peak_us = busy;
+    if (chassis.mode == CHASSIS_MODE_PATH && busy > chassis_path_result.max_loop_us)
+        chassis_path_result.max_loop_us = busy;
 }
 
 /* 速度模式入口：限幅后写入目标速度；非 READY 或非速度模式时忽略。 */

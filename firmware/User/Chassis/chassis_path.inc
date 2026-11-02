@@ -131,6 +131,11 @@ HAL_StatusTypeDef Chassis_FollowPath(const chassis_waypoint *points, unsigned co
     return HAL_OK;
 }
 
+unsigned Chassis_PathTarget(void)
+{
+    return s_path_index < s_path_count ? s_path_vertex[s_path_index] : 0U;
+}
+
 /* 点到线段的距离。 */
 static float Chassis_SegmentDistance(const chassis_waypoint *a, const chassis_waypoint *b, float x,
                                      float y)

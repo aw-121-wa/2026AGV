@@ -38,12 +38,18 @@ int main(void)
     drain(&uart);
     tx_log[0] = 0;
     uart.gState = 1; /* UART busy: the summary is still captured once, sent later */
-    chassis_path_result = (chassis_path_stats){123, 2, .1f, 456, 1};
+    chassis_path_result = (chassis_path_stats){.distance_mm = 123,
+                                               .max_cross_mm = 2,
+                                               .max_heading_deg = .1f,
+                                               .elapsed_ms = 456,
+                                               .max_jitter_us = 12,
+                                               .max_loop_us = 345,
+                                               .completed = 1};
     ChassisTelemetry_Poll();
     chassis_path_result.distance_mm = 999;
     drain(&uart);
-    assert(
-        strstr(tx_log, "DONE path: time=0.46s dist=123.0mm max_cross=2.00mm max_heading=0.10deg"));
+    assert(strstr(tx_log, "DONE path: time=0.46s dist=123.0mm max_cross=2.00mm max_heading=0.10deg "
+                          "jitter=12us loop=345us\r\n"));
     assert(strstr(tx_log, "999") == NULL);
     puts("PASS: idle commit, TC fragments, blended yaw, long append, S clearing, invalid atomic "
          "line, immutable completion stats");

@@ -30,6 +30,9 @@ uint8_t SerPort_Write(SerId id, const uint8_t *src, unsigned len);
 /* 丢弃接收缓冲中的全部数据。 */
 void SerPort_Flush(SerId id);
 
+/* 开关接收中断：不再需要的外设关掉接收，它继续发数据也不占 CPU。打开时丢弃之前的数据。 */
+void SerPort_EnableRx(SerId id, uint8_t on);
+
 typedef struct
 {
     uint32_t rx_bytes, rx_overflow, hw_errors, tx_dropped;

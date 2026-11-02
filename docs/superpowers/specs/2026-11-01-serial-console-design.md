@@ -21,17 +21,28 @@ Change core control values over USART6 while the firmware runs and see the effec
 | `/set <name> <value>` | Validate, apply, print old and new |
 | `/reset` | All parameters back to the compiled defaults; needs the robot stopped |
 | `/plot <heading\|speed\|wheels> [hz]`, `/plot off` | `plot:a,b,c` lines, 1 to 100 Hz, default 50 |
+| `/mode` | Report the run mode; the debug page uses this |
 
 Competition mode only:
 
 | Command | Effect |
 |---|---|
+| `/start` | Run the opening sequence. The real run needs a start button; this is the bench trigger |
+| `/run` | Report the state of the sequence |
+| `/task` | Report the task code again |
 | `/task <code>` | Enter a task code as if it had been scanned |
+| `/task clear` | Forget the code and reopen the scanner port |
 | `/vision <mode> [color]` | Set the host's vision mode and colour |
-| `/obs`, `/obs clear` | List lidar obstacles, or clear them while stopped |
-| `/pose <x> <y> <heading>` | Set the field pose after moving the robot by hand; needs chassis READY |
+| `/obs` | List lidar obstacles and the scan state |
+| `/scan` | Clear obstacles and scan once from here, while stopped |
+| `/pose <x> <y> <heading>` | Set the field pose after moving the robot by hand; needs chassis READY and stopped |
+| `/route <x> <y>` | Plan from the current pose, without moving |
+| `/route go` | Drive the planned route |
+| `/route` | Report the route state and points again |
 
-Also in competition mode, `F/B/L/R/T/A` and `W` work instead of answering `BUSY`. Survey mode stays locked.
+Also in competition mode, `F/B/L/R/T/A` and `W` work instead of answering `BUSY`, except while the opening sequence runs. Survey mode stays locked.
+
+While the sequence runs, the rules ban remote control, so only `S` and read-only commands are accepted.
 
 ## Parameters
 
@@ -55,11 +66,11 @@ Also in competition mode, `F/B/L/R/T/A` and `W` work instead of answering `BUSY`
 | Next sample | `lidar_x`, `lidar_y` | 0 | -200 to 200 | 1 |
 | Next sample | `lidar_yaw` | 0 | -180 to 180 | 2 |
 | Next sample | `lidar_min` | 200 | 50 to 500 | 0 |
-| Next sample | `lidar_max` | 1800 | 500 to 6000 | 0 |
+| Next sample | `lidar_max` | 3400 | 500 to 6000 | 0 |
 | Next sample | `obs_gap` | 45 | 5 to 200 | 1 |
 | Next sample | `obs_width` | 95 | 20 to 300 | 1 |
 | Next sample | `obs_match` | 60 | 10 to 300 | 1 |
-| Next sample | `obs_confirm` | 4 | 1 to 50 | 0 |
+| Next sample | `obs_confirm` | 8 | 1 to 50 | 0 |
 
 The lidar parameters exist in competition mode only. `CHASSIS_MAX_WHEEL_RPM` and `CHASSIS_MOVE_MAX_SPEED` stay compile-time as hard limits.
 
@@ -73,14 +84,19 @@ The lidar parameters exist in competition mode only. `CHASSIS_MAX_WHEEL_RPM` and
 
 ## Debug page
 
-`tools/agv_console.html` is the interface on top of this console: one offline file, opened in Chrome or Edge, using Web Serial. Its parameter list comes from `/list`, so a new parameter needs no page change. It parses only the firmware's text output. The formats it reads are pinned by `console_test`, `comp_task_test` and `survey_loop_test`.
+`tools/agv_console.html` is the interface on top of this console: one offline file, opened in Chrome or Edge, using Web Serial. Its parameter list comes from `/list`, so a new parameter needs no page change. It parses only the firmware's text output. The formats it reads are pinned by `console_test`, `comp_task_test`, `comp_route_test` and `survey_loop_test`.
+
+It has three workspaces: the debug workspace in all three modes, the task materials workspace in competition mode, and the map and route workspace in survey and competition mode.
+
+## Output must not disturb control
+
+Output happens after `Chassis_Update` in the 5 ms chassis task and only queues text for the interrupt-driven UART. Route points go out one line per tick, and only while the send buffer is under half full. `comp_route_test` runs one route with all output off and again with all of it on, and the wheel commands must match bit for bit. On the car, `DONE path` reports the worst cycle jitter and the longest cycle during that path.
 
 ## Out of scope
 
 - Saving values across power-off.
 - Host vision parameters; these stay in `vision/config.py`.
 - Arm parameters and jog or teach commands; they need the arm hardware details.
-- Locking the console during a run; this belongs with the start button, which doesn't exist yet. The rules ban remote control during a run, so that step must add it.
 
 ## Testing
 

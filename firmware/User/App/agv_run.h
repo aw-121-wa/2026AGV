@@ -44,4 +44,7 @@ void Agv_Tick(void);
 
 void Agv_Stop(void);
 
+/* 把整圈路线发给调试台（ROUTE 行）；还没开走时回 ROUTE none。开走时也会自动发一次。 */
+void Agv_RouteReport(void);
+
 #endif

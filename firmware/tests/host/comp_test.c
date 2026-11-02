@@ -120,32 +120,6 @@ typedef struct
     float x, y, r;
 } Cyl;
 
-static float RayRect(float ox, float oy, float dx, float dy, float x0, float y0, float x1,
-                     float y1)
-{
-    float tmin = 0, tmax = 1e9f;
-    float o[2] = {ox, oy}, d[2] = {dx, dy}, lo[2] = {x0, y0}, hi[2] = {x1, y1};
-    for (int k = 0; k < 2; ++k)
-    {
-        if (fabsf(d[k]) < 1e-9f)
-        {
-            if (o[k] < lo[k] || o[k] > hi[k])
-                return 1e9f;
-            continue;
-        }
-        float t0 = (lo[k] - o[k]) / d[k], t1 = (hi[k] - o[k]) / d[k];
-        if (t0 > t1)
-        {
-            float t = t0;
-            t0 = t1;
-            t1 = t;
-        }
-        tmin = fmaxf(tmin, t0);
-        tmax = fminf(tmax, t1);
-    }
-    return tmin <= tmax && tmin > 0 ? tmin : 1e9f;
-}
-
 static float Raycast(float ox, float oy, float dx, float dy, const Cyl *c, unsigned nc)
 {
     float best = 1e9f;
@@ -156,11 +130,6 @@ static float Raycast(float ox, float oy, float dx, float dy, const Cyl *c, unsig
         if (disc > 0 && b > 0)
             best = fminf(best, b - sqrtf(disc));
     }
-    const float L = MAP_ISLAND_LOW, H = MAP_ISLAND_HIGH, S = MAP_ISLAND_SIZE;
-    float isl[4][2] = {{L, L}, {H, L}, {L, H}, {H, H}};
-    for (int i = 0; i < 4; ++i)
-        best = fminf(best, RayRect(ox, oy, dx, dy, isl[i][0], isl[i][1], isl[i][0] + S,
-                                   isl[i][1] + S));
     /* 围挡：场地外 20 mm 厚的墙 */
     if (dx > 1e-6f)
         best = fminf(best, (MAP_WIDTH_MM - ox) / dx);
@@ -207,9 +176,13 @@ static void TestObstacles(void)
     LidarPose pose = {1200, 1200, 30.0f};
     uint32_t rev = Map_Revision();
     RunScans(&pose, cyl, 3, 2);
-    assert(lidar_obs.confirmed == 0); // 两圈不足以确认
-    RunScans(&pose, cyl, 3, 6);
     MapPoint list[16];
+    /* 扫完才写地图，圈数不够的不算。 */
+    assert(Map_Revision() == rev && LidarObs_List(list, 16) == 0);
+    assert(LidarObs_Finish() == 0 && Map_Revision() == rev);
+    RunScans(&pose, cyl, 3, 28);
+    assert(Map_Revision() == rev && LidarObs_List(list, 16) == 0);
+    assert(LidarObs_Finish() == 3);
     unsigned n = LidarObs_List(list, 16);
     printf("obstacles: %u (clusters=%u used=%u/%u)\n", n, (unsigned)lidar_obs.clusters,
            (unsigned)lidar_obs.used, (unsigned)lidar_obs.points);
@@ -224,25 +197,154 @@ static void TestObstacles(void)
         assert(best < 20.0f);
     }
     assert(Map_Revision() == rev + 3);
-    /* 继续扫描不会重复登记。 */
-    RunScans(&pose, cyl, 3, 200);
-    assert(LidarObs_List(list, 16) == 3 && Map_Revision() == rev + 3);
+    /* 再调一次不会重复登记。 */
+    assert(LidarObs_Finish() == 3 && LidarObs_List(list, 16) == 3 && Map_Revision() == rev + 3);
+    /* 每个障碍物只报告一次。 */
     MapPoint p;
     unsigned popped = 0;
     while (LidarObs_PopNew(&p))
         ++popped;
     assert(popped == 3 && !LidarObs_PopNew(&p));
+    /* 换个位置接着扫：写进地图的位置不再变，和地图一致。 */
+    MapPoint before[16], after[16];
+    assert(LidarObs_List(before, 16) == 3);
+    LidarPose elsewhere = {1200, 700, 0.0f};
+    RunScans(&elsewhere, cyl, 3, 20);
+    assert(LidarObs_Finish() == 3 && LidarObs_List(after, 16) == 3 && Map_Revision() == rev + 3);
+    assert(memcmp(before, after, sizeof(MapPoint) * 3U) == 0);
     /* 登记后障碍物附近的栅格不可走。 */
     uint16_t r, c;
     assert(Map_WorldToGrid(1200, 1700, &r, &c) && !Map_IsFree(r, c));
 
-    /* 空场地（只有岛和围挡）：不应产生任何障碍。 */
+    /* 空场地（只有围挡）：不应产生任何障碍。 */
     Map_Init();
     LidarObs_Init();
     LidarPose p2 = {1200, 250, -15.0f};
     RunScans(&p2, cyl, 0, 200);
-    assert(LidarObs_List(list, 16) == 0);
+    assert(LidarObs_Finish() == 0);
     printf("lidar obstacle OK\n");
+}
+
+/* C1 的模型比 RunScans 严：0.72° 步进、每圈相位随机、测距 ±30 mm，圆柱边缘打不回来（只有中间
+   70% 的宽度有回波）。对角 2.9 m 处 Ø50 每圈只打到一个点左右。 */
+static unsigned ScanOne(float sx, float sy, float cx, float cy, MapPoint *list)
+{
+    Map_Init();
+    LidarObs_Init();
+    LidarPose pose = {sx, sy, 0.0f};
+    for (unsigned k = 0; k <= COMP_SCAN_REVS; ++k)
+    {
+        float phase = Noise(0.36f) + 0.36f;
+        for (unsigned i = 0; i < 500; ++i)
+        {
+            float a = i * 0.72f + phase, world = -a * MATH_DEG_TO_RAD;
+            float dx = cosf(world), dy = sinf(world);
+            float px = cx - sx, py = cy - sy, b = px * dx + py * dy;
+            float miss = hypotf(px - b * dx, py - b * dy);
+            float d = b > 0.0f && miss < 25.0f * 0.7f ? b - sqrtf(625.0f - miss * miss) : 0.0f;
+            RPLidarSample s = {a, d > 0.0f ? d + Noise(30.0f) : 0.0f, 47, i == 0};
+            LidarObs_Feed(&s, &pose);
+        }
+    }
+    (void)LidarObs_Finish();
+    return LidarObs_List(list, 16);
+}
+
+/* 开局一次扫描要能看到全场：车道上任意位置，紧贴黄色区域的也算（它们是平的，不挡雷达）。
+   定位误差不能超过地图里留的余量，否则车会蹭到。 */
+static void TestGlobalScanSeesTheWholeField(void)
+{
+    static const float box[][4] = {{550, 550, 1000, 1000},  {1400, 550, 1850, 1000},
+                                   {550, 1400, 1000, 1850}, {1400, 1400, 1850, 1850},
+                                   {0, 910, 150, 1490},     {910, 0, 1490, 150}};
+    MapPoint list[16];
+    float worst = 0.0f;
+    unsigned tried = 0U;
+    for (unsigned zone = 1; zone <= 2; ++zone)
+    {
+        MapPoint home;
+        assert(Map_StartPoint((uint8_t)zone, &home));
+        for (float x = 110.0f; x <= 2290.0f; x += 180.0f)
+            for (float y = 110.0f; y <= 2230.0f; y += 180.0f)
+            {
+                uint8_t lane = hypotf(x - home.x, y - home.y) > 400.0f;
+                for (unsigned i = 0; i < 6U; ++i)
+                    if (x > box[i][0] - 25.0f && x < box[i][2] + 25.0f && y > box[i][1] - 25.0f &&
+                        y < box[i][3] + 25.0f)
+                        lane = 0U;
+                if (!lane)
+                    continue;
+                ++tried;
+                assert(ScanOne((float)home.x, (float)home.y, x, y, list) == 1U);
+                worst = fmaxf(worst, hypotf(list[0].x - x, list[0].y - y));
+            }
+    }
+    /* 紧贴黄色区域边上，朝车的那一面离它不到 40 mm。 */
+    MapPoint home;
+    assert(Map_StartPoint(1, &home));
+    assert(ScanOne((float)home.x, (float)home.y, 1370.0f, 1200.0f, list) == 1U);
+    worst = fmaxf(worst, hypotf(list[0].x - 1370.0f, list[0].y - 1200.0f));
+    printf("global scan: %u positions, worst error %.1f mm\n", tried, (double)worst);
+    assert(worst <= (float)COMP_OBS_MAP_RADIUS - COMP_OBS_RADIUS_MM + (float)MAP_MARGIN_MM);
+    Map_Init();
+    LidarObs_Init();
+}
+
+/* 从第一个位置被挡住的，换个位置看到后追加进地图，只报告这一个新的。 */
+static void TestLaterScanAddsHiddenObstacle(void)
+{
+    static const Cyl lined_up[2] = {{1200, 1700, 25}, {300, 1200, 25}};
+    LidarPose start = {2250, 2250, 0.0f}, board = {2205, 1205, 0.0f};
+    MapPoint list[16], p;
+    Map_Init();
+    LidarObs_Init();
+    uint32_t rev = Map_Revision();
+    RunScans(&start, lined_up, 2, 20);
+    assert(LidarObs_Finish() == 1 && Map_Revision() == rev + 1 && LidarObs_PopNew(&p));
+    assert(hypotf(p.x - 1200.0f, p.y - 1700.0f) < 30.0f && !LidarObs_PopNew(&p));
+    RunScans(&board, lined_up, 2, 20);
+    assert(LidarObs_Finish() == 2 && Map_Revision() == rev + 2 && LidarObs_PopNew(&p));
+    assert(hypotf(p.x - 300.0f, p.y - 1200.0f) < 30.0f && !LidarObs_PopNew(&p));
+    assert(LidarObs_List(list, 16) == 2);
+    Map_Init();
+    LidarObs_Init();
+}
+
+/* 转盘是场内唯一高出地面的固定物，它占的那段上边不算障碍物；同样靠上边、但不在转盘范围内的算。 */
+static void TestOnlyTurntableIsIgnored(void)
+{
+    MapPoint list[16];
+    assert(ScanOne(2250.0f, 2250.0f, 1200.0f, 2320.0f, list) == 0U);
+    assert(ScanOne(2250.0f, 2250.0f, 600.0f, 2290.0f, list) == 1U);
+    Map_Init();
+    LidarObs_Init();
+}
+
+/* 噪声把一个物体拆成两个目标时只写一个进地图。 */
+static void TestSplitTargetCountsOnce(void)
+{
+    LidarPose pose = {1200, 500, 90.0f};
+    Map_Init();
+    LidarObs_Init();
+    /* 雷达 0° 朝 +Y，距离 700、764 mm：相隔 64 mm，成为两个目标；之后越测越靠近。 */
+    const float gap_angle = 90.0f; // 中间夹一个不算簇的点，两次测量才不会并成一簇
+    static const float first[2] = {700.0f, 764.0f};
+    for (unsigned k = 0; k < 2U; ++k)
+    {
+        RPLidarSample s = {0.0f, first[k], 47, 1};
+        LidarObs_Feed(&s, &pose);
+    }
+    for (unsigned k = 0; k < 40U; ++k)
+    {
+        RPLidarSample s = {0.0f, k % 2U ? 752.0f : 712.0f, 47, 1};
+        RPLidarSample nothing = {gap_angle, 0.0f, 47, 0};
+        LidarObs_Feed(&s, &pose);
+        LidarObs_Feed(&nothing, &pose);
+    }
+    uint32_t revision = Map_Revision();
+    assert(LidarObs_Finish() == 1U && Map_Revision() == revision + 1U);
+    Map_Init();
+    LidarObs_Init();
 }
 
 /* 改运行时参数后，真实的识别结果要跟着变。三个圆柱离车分别约 500、520、900 mm。 */
@@ -251,6 +353,7 @@ static unsigned CountObstacles(unsigned scans, MapPoint *list)
     static const Cyl cyl[] = {{1200, 1700, 25}, {1720, 1180, 25}, {300, 1200, 25}};
     LidarPose pose = {1200, 1200, 30.0f};
     RunScans(&pose, cyl, 3, scans);
+    (void)LidarObs_Finish();
     return LidarObs_List(list, 16);
 }
 
@@ -268,34 +371,34 @@ static void TestLidarTuning(void)
 {
     MapPoint list[16];
     BeginTuning();
-    assert(CountObstacles(3, list) == 0); // 默认要连续 4 圈
+    assert(CountObstacles(3, list) == 0); // 默认要看到 8 圈
     BeginTuning();
     lidar_tune.obs_confirm = 2.0f;
     assert(CountObstacles(3, list) == 3);
 
     BeginTuning();
     lidar_tune.lidar_min = 600.0f; // 只剩 900 mm 那个
-    assert(CountObstacles(8, list) == 1 && fabsf((float)list[0].x - 300.0f) < 20.0f);
+    assert(CountObstacles(12, list) == 1 && fabsf((float)list[0].x - 300.0f) < 20.0f);
     BeginTuning();
     lidar_tune.lidar_max = 600.0f; // 去掉 900 mm 那个
-    assert(CountObstacles(8, list) == 2);
+    assert(CountObstacles(12, list) == 2);
 
     BeginTuning();
     lidar_tune.obs_width = 10.0f; // Ø50 的簇都比这宽
-    assert(CountObstacles(8, list) == 0);
+    assert(CountObstacles(12, list) == 0);
     BeginTuning();
-    lidar_tune.obs_gap = 1.0f; // 相邻点都被拆开，凑不成簇
-    assert(CountObstacles(8, list) == 0);
+    lidar_tune.obs_gap = 1.0f; // 相邻点都被拆开：单点也算，还是能认出来
+    assert(CountObstacles(12, list) == 3 && lidar_obs.clusters > 3U * 12U);
     BeginTuning();
     lidar_tune.obs_match = 0.1f; // 测距噪声下每圈的圆心都对不上
-    assert(CountObstacles(8, list) == 0);
+    assert(CountObstacles(12, list) == 0);
 
     /* 雷达实际装在车体前 100、左 40 mm，转了 90°：参数没跟上时位置全错，改对后回到真值。 */
     BeginTuning();
     mount_x = 100.0f;
     mount_y = 40.0f;
     mount_yaw = 90.0f;
-    unsigned wrong = CountObstacles(8, list);
+    unsigned wrong = CountObstacles(12, list);
     float far_off = 0.0f;
     for (unsigned i = 0; i < wrong; ++i)
         far_off = fmaxf(far_off, hypotf((float)list[i].x - 1200.0f, (float)list[i].y - 1700.0f));
@@ -306,7 +409,7 @@ static void TestLidarTuning(void)
     mount_y = lidar_tune.lidar_y = 40.0f;
     mount_yaw = lidar_tune.lidar_yaw = 90.0f;
     static const float truth[3][2] = {{1200, 1700}, {1720, 1180}, {300, 1200}};
-    assert(CountObstacles(8, list) == 3);
+    assert(CountObstacles(12, list) == 3);
     for (unsigned j = 0; j < 3; ++j)
     {
         float best = 1e9f;
@@ -339,8 +442,8 @@ static void TestSightLineStartsAtLidar(void)
     LidarPose left_mount = {1200, 1050, 0.0f};
     BeginTuning();
     lidar_tune.lidar_y = 150.0f;
-    FeedArc(&left_mount, 6);
-    assert(LidarObs_List(list, 16) == 1);
+    FeedArc(&left_mount, 12);
+    assert(LidarObs_Finish() == 1 && LidarObs_List(list, 16) == 1);
     assert(fabsf((float)list[0].x - 1516.0f) <= 1.0f && fabsf((float)list[0].y - 1200.0f) <= 1.0f);
 
     /* 雷达在车前 150 mm、转 90° 朝车左看：视线沿 +Y，x 不偏。 */
@@ -348,8 +451,8 @@ static void TestSightLineStartsAtLidar(void)
     BeginTuning();
     lidar_tune.lidar_x = 150.0f;
     lidar_tune.lidar_yaw = 90.0f;
-    FeedArc(&front_mount, 6);
-    assert(LidarObs_List(list, 16) == 1);
+    FeedArc(&front_mount, 12);
+    assert(LidarObs_Finish() == 1 && LidarObs_List(list, 16) == 1);
     assert(fabsf((float)list[0].x - 1200.0f) <= 1.0f && fabsf((float)list[0].y - 1516.0f) <= 1.0f);
     BeginTuning();
 }
@@ -360,6 +463,10 @@ int main(void)
     TestParser();
     TestVisionLink();
     TestObstacles();
+    TestGlobalScanSeesTheWholeField();
+    TestLaterScanAddsHiddenObstacle();
+    TestOnlyTurntableIsIgnored();
+    TestSplitTargetCountsOnce();
     TestLidarTuning();
     TestSightLineStartsAtLidar();
     printf("comp_test OK\n");

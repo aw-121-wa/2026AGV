@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "chassis.h"
+#include "chassis_telemetry.h"
 #include "agv_run.h"
 #include "agv_config.h"
 #include "map.h"
@@ -96,6 +97,20 @@ uint32_t HAL_GetTick(void)
     return now_ms;
 }
 
+static unsigned route_count;
+static telemetry_route_point route_point;
+
+void ChassisTelemetry_SendRoute(unsigned count, telemetry_route_point point)
+{
+    route_count = count;
+    route_point = point;
+}
+
+void ChassisTelemetry_Puts(const char *text)
+{
+    (void)text;
+}
+
 /* 每个节拍沿折线推进 120 mm，到点立刻切下一段；走完置 completed。 */
 static void Advance(float step)
 {
@@ -154,6 +169,7 @@ static void Reset(void)
     test_zone = 1U;
     physical_edges = 0;
     follow_calls = 0;
+    route_count = 0;
     freeze = 0;
     busy_left = 0;
     now_ms = 0;
@@ -196,6 +212,16 @@ int main(void)
         assert(fabsf(agv.y - (zone == 1 ? 2250.0f : 150.0f)) < 5.0f);
         assert(agv.home_residual_mm < 5.0f);
         assert(follow_calls == 1U);
+        /* 发给调试台的路线是场地坐标：底盘系航向 37° 也要换回来，和通道中心线对得上。 */
+        assert(route_count == s_tour_count + 1U);
+        MapPoint first = route_point(0U), last = route_point(route_count - 1U);
+        assert(first.x == 2250 && first.y == (zone == 1 ? 2250 : 150));
+        assert(last.x == first.x && last.y == first.y);
+        for (unsigned i = 1; i < route_count; ++i)
+        {
+            MapPoint a = route_point(i - 1U), b = route_point(i);
+            assert(a.x == b.x || a.y == b.y);
+        }
     }
     /* 停车锁存：不再下发任何路径。 */
     Reset();

@@ -192,6 +192,8 @@ void StartChassisTask(void *argument)
     Comp_Tick();
 #endif
 
+    Chassis_CycleEnd();
+
     next_tick += period;
 
     if ((int32_t)(next_tick - osKernelGetTickCount()) <= 0)

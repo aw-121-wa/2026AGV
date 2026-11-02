@@ -8,7 +8,8 @@ typedef struct
 {
     float x, y;
     uint32_t last_scan;
-    uint8_t hits, used, confirmed, reported;
+    uint16_t hits;
+    uint8_t used, committed, reported;
 } Track;
 
 typedef struct
@@ -40,24 +41,15 @@ void LidarObs_Init(void)
     memset(&lidar_obs, 0, sizeof(lidar_obs));
 }
 
-static uint8_t FreeAt(float x, float y)
-{
-    uint16_t r, c;
-    return Map_WorldToGrid((int32_t)x, (int32_t)y, &r, &c) && Map_IsFree(r, c);
-}
-
-/* 只有场内、远离已知结构的点才可能是新障碍。 */
+/* 场内高出地面的固定物只有围挡和转盘；黄色区域、粗加工区、暂存区都是平的，雷达打不到，
+   不能过滤：紧贴这些区域边上的障碍物只有这几个点。 */
 static uint8_t Interesting(float x, float y)
 {
     const float w = COMP_OBS_WALL_MM, s = COMP_OBS_STATIC_MM;
     if (x < w || y < w || x > MAP_WIDTH_MM - w || y > MAP_HEIGHT_MM - w)
         return 0;
-    /* 3×3 采样（含对角），矩形结构的角点附近也能挡住。 */
-    for (int i = -1; i <= 1; ++i)
-        for (int j = -1; j <= 1; ++j)
-            if (!FreeAt(x + i * s, y + j * s))
-                return 0;
-    return 1;
+    return y < MAP_HEIGHT_MM - MAP_TOP_RESERVE_MM - s || x < MAP_TABLE_X_MIN - s ||
+           x > MAP_TABLE_X_MAX + s;
 }
 
 static void Track_Update(float x, float y)
@@ -77,7 +69,7 @@ static void Track_Update(float x, float y)
     }
     if (!best)
     {
-        /* 新目标：占空槽；没有空槽就顶掉最久没见的未确认目标。 */
+        /* 新目标：占空槽；没有空槽就顶掉最久没见的、圈数还不够的目标。 */
         for (unsigned i = 0; i < COMP_OBS_TRACKS; ++i)
         {
             Track *t = &tracks[i];
@@ -86,7 +78,7 @@ static void Track_Update(float x, float y)
                 best = t;
                 break;
             }
-            if (!t->confirmed && (!best || t->last_scan < best->last_scan))
+            if (t->hits < lidar_tune.obs_confirm && (!best || t->last_scan < best->last_scan))
                 best = t;
         }
         if (!best)
@@ -94,10 +86,10 @@ static void Track_Update(float x, float y)
         *best = (Track){x, y, lidar_obs.scans, 1, 1, 0, 0};
         return;
     }
-    if (best->confirmed)
+    if (best->committed) // 已经写进地图了，位置要和地图一致
         return;
-    /* 滑动平均，最多按 8 次平均，保证后面的测量还能修正位置。 */
-    float k = 1.0f / (float)(best->hits < 8U ? best->hits + 1U : 8U);
+    /* 车停着，每次测量同样可信，直接求平均。 */
+    float k = 1.0f / (float)(best->hits + 1U);
     best->x += (x - best->x) * k;
     best->y += (y - best->y) * k;
     if (best->last_scan != lidar_obs.scans) // 同一圈被拆成两簇只算一次
@@ -105,19 +97,12 @@ static void Track_Update(float x, float y)
         ++best->hits;
         best->last_scan = lidar_obs.scans;
     }
-    if (best->hits >= lidar_tune.obs_confirm)
-    {
-        best->confirmed = 1;
-        ++lidar_obs.confirmed;
-        if (!Map_AddObstacle((int32_t)lroundf(best->x), (int32_t)lroundf(best->y),
-                             COMP_OBS_MAP_RADIUS))
-            ++lidar_obs.map_full;
-    }
 }
 
+/* 一个点也算一簇：对角远处 Ø50 每圈常常只打到一个点，误检靠跨圈的圈数要求滤掉。 */
 static void Cluster_Close(void)
 {
-    if (cl.n >= 2U)
+    if (cl.n)
     {
         ++lidar_obs.clusters;
         float width = hypotf(cl.lx - cl.fx, cl.ly - cl.fy);
@@ -142,7 +127,7 @@ static void EndScan(void)
 {
     ++lidar_obs.scans;
     for (unsigned i = 0; i < COMP_OBS_TRACKS; ++i)
-        if (tracks[i].used && !tracks[i].confirmed &&
+        if (tracks[i].used && tracks[i].hits < lidar_tune.obs_confirm &&
             lidar_obs.scans - tracks[i].last_scan > COMP_OBS_FORGET)
             tracks[i].used = 0;
 }
@@ -189,11 +174,35 @@ void LidarObs_Feed(const RPLidarSample *s, const LidarPose *pose)
     ++cl.n;
 }
 
+unsigned LidarObs_Finish(void)
+{
+    Cluster_Close();
+    for (unsigned i = 0; i < COMP_OBS_TRACKS; ++i)
+    {
+        Track *t = &tracks[i];
+        if (!t->used || t->committed || t->hits < lidar_tune.obs_confirm)
+            continue;
+        /* 噪声把一个物体拆成两个目标时只留一个。 */
+        uint8_t duplicate = 0;
+        for (unsigned j = 0; j < COMP_OBS_TRACKS; ++j)
+            if (tracks[j].committed &&
+                hypotf(tracks[j].x - t->x, tracks[j].y - t->y) < lidar_tune.obs_match)
+                duplicate = 1;
+        if (duplicate)
+            continue;
+        t->committed = 1;
+        ++lidar_obs.confirmed;
+        if (!Map_AddObstacle((int32_t)lroundf(t->x), (int32_t)lroundf(t->y), COMP_OBS_MAP_RADIUS))
+            ++lidar_obs.map_full;
+    }
+    return lidar_obs.confirmed;
+}
+
 unsigned LidarObs_List(MapPoint *out, unsigned max)
 {
     unsigned n = 0;
     for (unsigned i = 0; i < COMP_OBS_TRACKS && n < max; ++i)
-        if (tracks[i].used && tracks[i].confirmed)
+        if (tracks[i].committed)
             out[n++] = (MapPoint){(int32_t)lroundf(tracks[i].x), (int32_t)lroundf(tracks[i].y)};
     return n;
 }
@@ -201,7 +210,7 @@ unsigned LidarObs_List(MapPoint *out, unsigned max)
 uint8_t LidarObs_PopNew(MapPoint *p)
 {
     for (unsigned i = 0; i < COMP_OBS_TRACKS; ++i)
-        if (tracks[i].used && tracks[i].confirmed && !tracks[i].reported)
+        if (tracks[i].committed && !tracks[i].reported)
         {
             tracks[i].reported = 1;
             *p = (MapPoint){(int32_t)lroundf(tracks[i].x), (int32_t)lroundf(tracks[i].y)};

@@ -161,6 +161,22 @@ void SerPort_Flush(SerId id)
     ports[id].rx_tail = ports[id].rx_head;
 }
 
+void SerPort_EnableRx(SerId id, uint8_t on)
+{
+    USART_TypeDef *u = ports[id].h.Instance;
+    if (!on)
+    {
+        CLEAR_BIT(u->CR1, USART_CR1_RXNEIE_RXFNEIE);
+        CLEAR_BIT(u->CR3, USART_CR3_EIE);
+        return;
+    }
+    u->ICR = USART_ICR_ORECF | USART_ICR_FECF | USART_ICR_NECF | USART_ICR_PECF;
+    (void)u->RDR;
+    SerPort_Flush(id);
+    SET_BIT(u->CR1, USART_CR1_RXNEIE_RXFNEIE);
+    SET_BIT(u->CR3, USART_CR3_EIE);
+}
+
 uint8_t SerPort_Write(SerId id, const uint8_t *src, unsigned len)
 {
     Port *p = &ports[id];

@@ -1,5 +1,5 @@
 /* 比赛模式的主机测试：真实的 competition.c、控制台、解析、视觉协议和雷达识别，
-   只替换串口和文本输出。 */
+   只替换串口、文本输出和底盘。路线和底盘连起来的闭环在 comp_route_test.c。 */
 #include "chassis.h"
 #include "chassis_telemetry.h"
 #include "comp_config.h"
@@ -15,6 +15,31 @@
 chassis_t chassis;
 chassis_tuning chassis_tune = CHASSIS_TUNE_DEFAULTS;
 const chassis_tuning chassis_tune_default = CHASSIS_TUNE_DEFAULTS;
+chassis_path_stats chassis_path_result;
+
+void Chassis_Stop(void)
+{
+    chassis.mode = CHASSIS_MODE_VEL;
+}
+
+void Chassis_SetMoveSpeedLimit(float mm_per_second)
+{
+    (void)mm_per_second;
+}
+
+HAL_StatusTypeDef Chassis_FollowPath(const chassis_waypoint *points, unsigned count,
+                                     uint8_t stop_each)
+{
+    (void)points;
+    (void)count;
+    (void)stop_each;
+    return HAL_OK;
+}
+
+unsigned Chassis_PathTarget(void)
+{
+    return 0U;
+}
 
 const char *ChassisTelemetry_Num(float value, unsigned decimals)
 {
@@ -30,6 +55,18 @@ void ChassisTelemetry_SetPlot(telemetry_plot group, unsigned hz)
 {
     (void)group;
     (void)hz;
+}
+
+void ChassisTelemetry_SendRoute(unsigned count, telemetry_route_point point)
+{
+    (void)count;
+    (void)point;
+}
+
+static uint8_t periodic_on = 1U;
+uint8_t ChassisTelemetry_Periodic(void)
+{
+    return periodic_on;
 }
 
 static uint32_t tick = 1000U;
@@ -71,15 +108,25 @@ static struct
     SerPortStats stats;
 } port[SER_COUNT];
 
+static uint8_t rx_on[SER_COUNT];
+static unsigned reads[SER_COUNT];
+
 HAL_StatusTypeDef SerPort_Init(SerId id, uint32_t baud)
 {
     port[id].baud = baud;
+    rx_on[id] = 1U;
     return HAL_OK;
+}
+
+void SerPort_EnableRx(SerId id, uint8_t on)
+{
+    rx_on[id] = on;
 }
 
 unsigned SerPort_Read(SerId id, uint8_t *dst, unsigned max)
 {
     unsigned n = 0;
+    ++reads[id];
     while (n < max && port[id].tail < port[id].head)
     {
         dst[n++] = port[id].data[port[id].tail++];
@@ -133,8 +180,10 @@ static void Begin(void)
 {
     memset(port, 0, sizeof(port));
     memset(written_len, 0, sizeof(written_len));
+    memset(reads, 0, sizeof(reads));
     memset(printed, 0, sizeof(printed));
     printed_len = 0;
+    periodic_on = 1U;
     memset(&chassis, 0, sizeof(chassis));
     lidar_tune = lidar_tune_default;
     assert(Comp_Init(1) == HAL_OK);
@@ -171,16 +220,33 @@ static const uint8_t *FindVisionFrame(uint8_t type, uint8_t *payload_len)
     return NULL;
 }
 
-/* 雷达正前方 500 mm 处一小段弧，连续 6 圈，足够确认成障碍物。 */
+/* 雷达正前方 500 mm 处一小段弧，扫够一次扫描的圈数。 */
 static void SeeObstacle(void)
 {
     LidarPose pose = {1200, 1200, 0};
-    for (unsigned scan = 0; scan < 6U; ++scan)
+    for (unsigned scan = 0; scan <= COMP_SCAN_REVS; ++scan)
         for (int a = -2; a <= 2; ++a)
         {
             RPLidarSample s = {(float)(a < 0 ? a + 360 : a), 500.0f, 47, a == -2};
             LidarObs_Feed(&s, &pose);
         }
+}
+
+/* 雷达状态机走到读数阶段，这一拍发现圈数够了就结束扫描。 */
+static void FinishScan(void)
+{
+    Tick(COMP_LIDAR_BOOT_MS);
+    Tick(COMP_LIDAR_STOP_MS);
+    Tick(5);
+}
+
+/* 底盘就绪、位姿定下来，/scan 才能用。 */
+static void AnchorHere(void)
+{
+    chassis.state = CHASSIS_STATE_READY;
+    Console("pose 1200 1200 0");
+    Tick(5);
+    ClearPrinted();
 }
 
 static void TestScannerPortIsOpened(void)
@@ -224,46 +290,67 @@ static void TestCodeWithoutLineEnding(void)
     assert(comp.task_valid);
 }
 
-/* 连续读码模式下同一个码会反复收到，只报告一次，也不会把一行拆开重复处理。 */
-static void TestRepeatedReadsReportOnce(void)
+/* 第一个合法的码输出一次就定下来：扫码口关掉、不再读，后面读到什么都不管。 */
+static void TestFirstValidCodeIsFinal(void)
 {
     Begin();
-    for (int i = 0; i < 5; ++i)
-    {
-        Scan("156+123+516+231\r\n");
-        Tick(5);
-    }
-    assert(comp.task_valid && comp.task_rejected == 0U);
-    assert(CountPrinted("156+123+516+231") == 1U);
-}
-
-static void TestNewCodeReplacesOld(void)
-{
-    Begin();
+    assert(rx_on[SER_SCANNER]);
     Scan("156+123+516+231\r\n");
     Tick(5);
+    assert(comp.task_valid && CountPrinted("COMP task 156+123+516+231 from scanner") == 1U);
+    assert(!rx_on[SER_SCANNER]);
+
+    unsigned before = reads[SER_SCANNER];
     Scan("234+312+432+123\r\n");
-    Tick(5);
-    assert(comp.task_valid && strcmp(comp.task.text, "234+312+432+123") == 0);
-    assert(comp.task.color[0][0] == COLOR_YELLOW);
+    Scan("garbage\r\n");
+    for (int i = 0; i < 100; ++i)
+        Tick(5);
+    assert(reads[SER_SCANNER] == before);
+    assert(strcmp(comp.task.text, "156+123+516+231") == 0 && comp.task_rejected == 0U);
+    assert(CountPrinted("156+123+516+231") == 1U && CountPrinted("234+312") == 0U);
 }
 
-/* 读错的内容要打印出来让现场能看到模块读到了什么，但不能覆盖已有的合法任务码。 */
-static void TestBadTextKeepsValidCode(void)
+/* 同一包里合法的码后面还有别的内容：第一个定下来，后面的不看。 */
+static void TestCodeThenMoreInOnePacket(void)
 {
     Begin();
-    Scan("156+123+516+231\r\n");
+    Scan("156+123+516+231\r\n234+312+432+123\r\n");
     Tick(5);
+    Tick(COMP_SCANNER_IDLE_MS);
+    assert(strcmp(comp.task.text, "156+123+516+231") == 0 && comp.task_rejected == 0U);
+}
+
+/* 读错的内容打印出来让现场能看到模块读到了什么，然后继续读，直到读到合法的码。 */
+static void TestBadTextThenGoodCode(void)
+{
+    Begin();
     Scan("123+321\r\n");
     Tick(5);
-    assert(comp.task_valid && strcmp(comp.task.text, "156+123+516+231") == 0);
-    assert(comp.task_rejected == 1U);
+    assert(!comp.task_valid && comp.task_rejected == 1U && rx_on[SER_SCANNER]);
     assert(CountPrinted("123+321") == 1U);
     /* 连续读到同样的错码：继续计数，但不刷屏。 */
     Scan("123+321\r\n");
     Tick(5);
-    assert(comp.task_rejected == 2U);
-    assert(CountPrinted("123+321") == 1U);
+    assert(comp.task_rejected == 2U && CountPrinted("123+321") == 1U);
+    Scan("156+123+516+231\r\n");
+    Tick(5);
+    assert(comp.task_valid && !rx_on[SER_SCANNER]);
+}
+
+/* 相机也在找二维码的话，定下来之后让它停。 */
+static void TestCameraStopsLookingForCode(void)
+{
+    Begin();
+    Comp_SetVisionMode(VISION_QR, COLOR_ANY);
+    Scan("156+123+516+231\r\n");
+    Tick(5);
+    assert(comp.vision_mode == VISION_OFF);
+    /* 别的视觉任务不受影响。 */
+    Console("task clear");
+    Comp_SetVisionMode(VISION_MATERIAL, COLOR_RED);
+    Scan("156+123+516+231\r\n");
+    Tick(5);
+    assert(comp.vision_mode == VISION_MATERIAL && comp.vision_color == COLOR_RED);
 }
 
 static void TestBadTextAloneGivesNoTask(void)
@@ -290,29 +377,68 @@ static void TestCodeFromCamera(void)
     Tick(5);
     assert(comp.task_valid && strcmp(comp.task.text, "156+123+516+231") == 0);
     assert(comp.task_rejected == 1U);
+
+    /* 定下来之后相机再发也不管。 */
+    n = VisionLink_Encode(VL_HOST_TASK, (const uint8_t *)"234+312+432+123", 15, frame);
+    Inject(SER_VISION, frame, n);
+    Tick(5);
+    assert(strcmp(comp.task.text, "156+123+516+231") == 0 && comp.task_rejected == 1U);
+    assert(CountPrinted("234+312") == 0U);
+    /* /task clear 之后也不会把定下来期间收到的旧帧翻出来。 */
+    Console("task clear");
+    Tick(5);
+    assert(!comp.task_valid);
 }
 
-/* 周期状态行要显示当前任务码，现场不用翻历史就能确认。 */
-static void TestReportShowsTask(void)
+/* 周期文本只报还没做完的事：任务码定下来就不再报了。要看就问一次。 */
+static void TestTaskIsPrintedOnceThenOnRequest(void)
 {
     Begin();
+    Tick(COMP_REPORT_PERIOD_MS);
+    assert(CountPrinted("COMP task=none") == 1U);
     Scan("156+123+516+231\r\n");
     Tick(5);
     assert(CountPrinted("156+123+516+231") == 1U);
+    ClearPrinted();
     Tick(COMP_REPORT_PERIOD_MS);
-    assert(CountPrinted("156+123+516+231") == 2U);
+    assert(CountPrinted("COMP task") == 0U && CountPrinted("156+123") == 0U);
+    Console("task");
+    assert(CountPrinted("COMP task 156+123+516+231 from scanner, batch 2 storage rings 2 1 3\r\n") ==
+           1U);
 }
 
 static void TestConsoleTask(void)
 {
     Begin();
+    Console("task");
+    assert(CountPrinted("COMP task none\r\n") == 1U);
     Console("task 156+123+516+231");
     assert(comp.task_valid && strcmp(comp.task.text, "156+123+516+231") == 0);
-    assert(CountPrinted("console") == 1U);
+    assert(CountPrinted("console") == 1U && !rx_on[SER_SCANNER]);
     Console("task 123+321"); // 错码不覆盖好码，走同一套校验
     assert(comp.task_rejected == 1U && strcmp(comp.task.text, "156+123+516+231") == 0);
-    Console("task");
+    Console("task 234+312+432+123"); // 明确手动输入的可以换
+    assert(strcmp(comp.task.text, "234+312+432+123") == 0);
+    ClearPrinted();
+    Console("task 1 2");
     assert(CountPrinted("ERR") == 1U);
+
+    /* 台架上换一个码重新试：忘掉当前的，扫码口重新打开。 */
+    ClearPrinted();
+    Console("task clear");
+    assert(CountPrinted("OK   task cleared") == 1U && !comp.task_valid && rx_on[SER_SCANNER]);
+    Scan("156+123+516+231\r\n");
+    Tick(5);
+    assert(comp.task_valid && strcmp(comp.task.text, "156+123+516+231") == 0);
+
+    /* 模块读到一半时手动输入了：定下来之后，半行内容不再当码处理。 */
+    Console("task clear");
+    Scan("156+1");
+    Tick(5);
+    Console("task 234+312+432+123");
+    unsigned rejected = comp.task_rejected;
+    Tick(COMP_SCANNER_IDLE_MS);
+    assert(comp.task_rejected == rejected && strcmp(comp.task.text, "234+312+432+123") == 0);
 }
 
 static void TestConsoleVision(void)
@@ -342,13 +468,26 @@ static void TestConsoleObstacles(void)
 {
     Begin();
     Console("obs");
-    assert(CountPrinted("0 obstacles") == 1U);
+    assert(CountPrinted("OK   0 obstacles, scan idle\r\n") == 1U);
 
+    /* 位姿没定不能扫。 */
+    ClearPrinted();
+    Console("scan");
+    assert(CountPrinted("BUSY") == 1U);
+
+    AnchorHere();
+    Console("scan");
+    assert(CountPrinted("OK   scan restarted") == 1U);
     SeeObstacle();
-    Tick(COMP_LIDAR_BOOT_MS); // 雷达状态机走到运行状态后，比赛模式才统计新障碍物
+    Tick(COMP_LIDAR_BOOT_MS);
     Tick(COMP_LIDAR_STOP_MS);
-    Tick(5);
-    assert(comp.obstacles == 1U);
+    written_len[SER_VISION] = 0;
+    Tick(5); // 这一拍扫完，同一拍告诉上位机
+    assert(comp.obstacles == 1U && comp.lidar_state == COMP_LIDAR_DONE);
+    uint8_t reported = 0;
+    const uint8_t *result = FindVisionFrame(VL_MCU_OBSTACLES, &reported);
+    assert(result && reported == 5U && result[0] == 1U);
+    assert(CountPrinted("COMP obstacle #1 at (") == 1U && CountPrinted("COMP scan done: 1 obstacles") == 1U);
     MapPoint list[16];
     assert(LidarObs_List(list, 16) == 1U);
     uint16_t r, c;
@@ -357,34 +496,37 @@ static void TestConsoleObstacles(void)
     snprintf(where, sizeof(where), "(%ld,%ld)", (long)list[0].x, (long)list[0].y);
     ClearPrinted();
     Console("obs");
-    assert(CountPrinted(where) == 1U && CountPrinted("1 obstacles") == 1U);
+    assert(CountPrinted(where) == 1U && CountPrinted("OK   1 obstacles, scan done\r\n") == 1U);
 
-    /* 运动中不能清：重建地图要几毫秒，路径也可能正依赖它。 */
+    /* 运动中不能重扫：重建地图要十几毫秒，路径也可能正依赖它。 */
     chassis.mode = CHASSIS_MODE_PATH;
     ClearPrinted();
-    Console("obs clear");
+    Console("scan");
     assert(CountPrinted("BUSY") == 1U && LidarObs_List(list, 16) == 1U);
     chassis.mode = CHASSIS_MODE_VEL;
 
     ClearPrinted();
     Console("obs nonsense");
-    assert(CountPrinted("ERR") == 1U && LidarObs_List(list, 16) == 1U);
+    Console("scan nonsense");
+    assert(CountPrinted("ERR") == 2U && LidarObs_List(list, 16) == 1U);
 
     written_len[SER_VISION] = 0;
-    Console("obs clear");
+    Console("scan");
     assert(LidarObs_List(list, 16) == 0U && lidar_obs.confirmed == 0U && comp.obstacles == 0U);
     assert(Map_IsFree(r, c)); // 地图里也清掉了
+    assert(comp.lidar_state == COMP_LIDAR_STOPPING && rx_on[SER_LIDAR]);
     /* 上位机的障碍物表也要同步清空。 */
     Tick(5);
     uint8_t n = 0;
     const uint8_t *frame = FindVisionFrame(VL_MCU_OBSTACLES, &n);
     assert(frame && n == 1U && frame[0] == 0U);
 
-    /* 清完还能重新识别，运行时参数不受影响。 */
+    /* 还能重新识别，运行时参数不受影响。 */
     lidar_tune.obs_gap = 44.0f;
     SeeObstacle();
-    assert(LidarObs_List(list, 16) == 1U);
-    Console("obs clear");
+    FinishScan();
+    assert(LidarObs_List(list, 16) == 1U && comp.lidar_state == COMP_LIDAR_DONE);
+    Console("scan");
     assert(lidar_tune.obs_gap == 44.0f);
 }
 
@@ -462,16 +604,23 @@ static void TestConsoleLidarParameters(void)
     assert(CountPrinted("obs_") == 4U);
 
     Console("reset");
-    assert(lidar_tune.lidar_yaw == 0.0f && lidar_tune.obs_confirm == 4.0f);
+    assert(lidar_tune.lidar_yaw == 0.0f && lidar_tune.obs_confirm == (float)COMP_OBS_CONFIRM);
 }
 
-/* 界面按这行取位姿、雷达、视觉和任务状态，格式变了界面就读不到，所以逐字固定。 */
+/* 界面按这几行取雷达、任务和视觉状态，格式变了界面就读不到，所以逐字固定。 */
 static void TestReportFormatForUi(void)
 {
     Begin();
     Tick(COMP_REPORT_PERIOD_MS);
-    assert(strcmp(printed, "COMP pose=(0,0,0.0) lidar=STOP 0.0Hz pts=0 used=0 clu=0 obs=0 rs=0/0 | "
-                           "vision=OFF mode=0 mat=0 ring=0 crc=0 | task=none rej=0 scan=0/0\r\n") == 0);
+    assert(strcmp(printed, "COMP lidar=STOP 0.0Hz revs=0/20 pts=0 used=0 clu=0 rs=0/0\r\n"
+                           "COMP task=none rej=0 scan=0/0\r\n"
+                           "COMP vision=OFF mode=0 mat=0 ring=0 crc=0\r\n") == 0);
+
+    /* D0 关掉周期文本。 */
+    ClearPrinted();
+    periodic_on = 0U;
+    Tick(COMP_REPORT_PERIOD_MS);
+    assert(printed_len == 0U);
 }
 
 static void TestConsoleHelpListsBenchCommands(void)
@@ -480,6 +629,8 @@ static void TestConsoleHelpListsBenchCommands(void)
     Console("help");
     assert(CountPrinted("/task") == 1U && CountPrinted("/vision") == 1U);
     assert(CountPrinted("/obs") == 1U && CountPrinted("/pose") == 1U);
+    assert(CountPrinted("/scan") == 1U && CountPrinted("/route") == 1U);
+    assert(CountPrinted("/mode") == 1U && CountPrinted("/start") == 1U && CountPrinted("/run") == 1U);
 }
 
 int main(void)
@@ -496,14 +647,15 @@ int main(void)
     TestCodeFromScannerIsAccepted();
     TestCodeSplitAcrossTicks();
     TestCodeWithoutLineEnding();
-    TestRepeatedReadsReportOnce();
-    TestNewCodeReplacesOld();
-    TestBadTextKeepsValidCode();
+    TestFirstValidCodeIsFinal();
+    TestCodeThenMoreInOnePacket();
+    TestBadTextThenGoodCode();
     TestBadTextAloneGivesNoTask();
     TestCodeFromCamera();
-    TestReportShowsTask();
+    TestCameraStopsLookingForCode();
+    TestTaskIsPrintedOnceThenOnRequest();
     printf("PASS: console task, vision, obstacles, pose and lidar parameters; scanner port, "
-           "accepted code, split across ticks, no line ending, repeated reads, replacement, "
-           "bad text, camera channel, status line\n");
+           "accepted code, split across ticks, no line ending, first code is final, bad text, "
+           "camera channel, status lines\n");
     return 0;
 }

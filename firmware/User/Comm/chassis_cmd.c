@@ -9,6 +9,9 @@
 #if AGV_MODE != AGV_MODE_COMMAND
 #include "agv_run.h"
 #endif
+#if AGV_MODE == AGV_MODE_COMPETITION
+#include "competition.h"
+#endif
 
 #define CMD_BUF_SIZE  32U
 #define CMD_RING_SIZE 256U
@@ -57,10 +60,25 @@ static void ConsoleFeed(uint16_t ch)
 
 static void StopRobot(void)
 {
+#if AGV_MODE == AGV_MODE_COMPETITION
+    Comp_Stop();
+#endif
 #if AGV_MODE != AGV_MODE_COMMAND
     Agv_Stop();
 #else
     Chassis_Stop();
+#endif
+}
+
+/* 巡检路线是固定的，比赛流程运行中规则禁止遥控：这些时候不接受手动运动。 */
+static uint8_t ManualLocked(void)
+{
+#if AGV_MODE == AGV_MODE_SURVEY
+    return 1U;
+#elif AGV_MODE == AGV_MODE_COMPETITION
+    return Comp_Running();
+#else
+    return 0U;
 #endif
 }
 
@@ -122,13 +140,10 @@ static void ExecuteMeta(void)
             ChassisTelemetry_Ack('D', HAL_ERROR);
         break;
     case 'W':
-#if AGV_MODE == AGV_MODE_SURVEY
-        chassis_cmd_status = HAL_BUSY;
-#else
-        chassis_cmd_status = (!digits || value == 0U) ? Chassis_WheelTest(0x0FU)
+        chassis_cmd_status = ManualLocked()              ? HAL_BUSY
+                             : (!digits || value == 0U) ? Chassis_WheelTest(0x0FU)
                              : value <= 4U ? Chassis_WheelTest((uint8_t)(1U << (value - 1U)))
                                            : HAL_ERROR;
-#endif
         ChassisTelemetry_Ack('W', chassis_cmd_status);
         break;
     default:
@@ -161,15 +176,13 @@ static void Execute(void)
         Reset();
         return;
     }
-    /* 巡检路线是固定的，不接受手动运动。比赛模式还没有比赛流程，可以手动开车做台架调试；
-       加上比赛流程后，运行中必须锁掉（规则禁止遥控）。 */
-#if AGV_MODE == AGV_MODE_SURVEY
-    chassis_cmd_status = HAL_BUSY;
-    ChassisTelemetry_Ack(direction, chassis_cmd_status);
-    Reset();
-    (void)x;
-    return;
-#endif
+    if (ManualLocked())
+    {
+        chassis_cmd_status = HAL_BUSY;
+        ChassisTelemetry_Ack(direction, chassis_cmd_status);
+        Reset();
+        return;
+    }
     if (!pending_count && chassis.mode != CHASSIS_MODE_PATH)
         planned = (chassis_waypoint){chassis.pos_x, chassis.pos_y, chassis.yaw};
     chassis_waypoint point = pending_count ? pending[pending_count - 1] : planned;

@@ -153,6 +153,7 @@ typedef struct
     float yaw;                                // 航向角，deg
     float dt_actual;                          // 本周期 DWT 实测步长，s
     uint32_t jitter_us;                       // 观测到的最大节拍偏差，µs
+    uint32_t loop_peak_us;                    // 观测到的单拍最长占用，µs；超过周期下一拍才会迟到
     uint8_t state;
     uint8_t mode;          // 当前模式，取值见 chassis_mode
     uint32_t cycle;        // 周期计数，用于分频
@@ -200,6 +201,7 @@ typedef struct
 {
     float distance_mm, max_cross_mm, max_heading_deg;
     uint32_t elapsed_ms;
+    uint32_t max_jitter_us, max_loop_us; // 这条路径期间的最大节拍偏差、单拍最长占用
     uint8_t completed;
 } chassis_path_stats;
 extern chassis_path_stats chassis_path_result;
@@ -208,6 +210,8 @@ HAL_StatusTypeDef Chassis_FollowPath(const chassis_waypoint *points, unsigned co
                                      uint8_t stop_each);
 /* 将世界坐标航点追加到正在运行的路径。 */
 HAL_StatusTypeDef Chassis_AppendPath(const chassis_waypoint *points, unsigned count);
+/* 正在走向第几个航点：1 是 Chassis_FollowPath 给的第一个，没有路径时返回 0。 */
+unsigned Chassis_PathTarget(void);
 
 // 在调度器启动前调用一次；内部完成 DWT、CAN 总线、四轴注册。
 HAL_StatusTypeDef Chassis_Init(FDCAN_HandleTypeDef *hfdcan);
@@ -218,6 +222,8 @@ void Chassis_SetVelocity(float vx, float vy, float wz);
 void Chassis_Stop(void);
 // 只在一个任务里按 CHASSIS_PERIOD_US 周期调用。
 void Chassis_Update(void);
+// 底盘任务做完这一拍的所有事后调用，统计单拍占用。
+void Chassis_CycleEnd(void);
 // 单调递增的微秒时基，供任务层对齐节拍。
 // 注意：内部有状态（会推进累加器），只在底盘任务里调用；回绕周期约 71.6 分钟。
 // 算差值一律用无符号减法 uint32_t elapsed = now - last; 不要写 if (now > last)。

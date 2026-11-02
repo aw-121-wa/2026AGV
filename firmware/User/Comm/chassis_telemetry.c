@@ -7,8 +7,10 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#if AGV_MODE != AGV_MODE_COMMAND
+#if AGV_MODE == AGV_MODE_SURVEY
 #include "agv_run.h"
+#elif AGV_MODE == AGV_MODE_COMPETITION
+#include "competition.h"
 #endif
 
 /* 纯文本串口输出：串口助手直接可读，不依赖任何上位机程序。 */
@@ -31,6 +33,9 @@ static uint32_t plot_period_ms, last_plot;
 static uint8_t last_state = 0xFFU, last_fault;
 static uint8_t stats_seen, wheel_seq, wheel_active;
 static uint8_t banner_done;
+static telemetry_route_point route_point; // 非 NULL = 有路线没发完
+static unsigned route_total, route_line;
+static uint32_t route_ms;
 
 static const char *const k_wheel_name[CHASSIS_WHEEL_NUM] = {"LF", "RF", "LR", "RR"};
 
@@ -212,12 +217,15 @@ static void PrintStatus(uint32_t now)
     else if (chassis.state == CHASSIS_STATE_FAULT)
         ChassisTelemetry_Printf(" | fault: %s (send S)", FaultText());
     ChassisTelemetry_Printf("\r\n");
-#if AGV_MODE != AGV_MODE_COMMAND
+#if AGV_MODE == AGV_MODE_SURVEY
     ChassisTelemetry_Printf("          AGV state=%u err=%u leg=%u covered=0x%03x field=(%s,%s) "
                             "residual=%smm\r\n",
                             (unsigned)agv.state, (unsigned)agv.error, (unsigned)agv.leg,
                             (unsigned)agv.covered, Num(agv.x, 1), Num(agv.y, 1),
                             Num(agv.home_residual_mm, 2));
+#elif AGV_MODE == AGV_MODE_COMPETITION
+    ChassisTelemetry_Printf("          POSE (%s,%s,%s)\r\n", Num(comp.x, 1), Num(comp.y, 1),
+                            Num(comp.heading_deg, 2));
 #endif
 }
 
@@ -226,10 +234,35 @@ static void PrintBanner(void)
     ChassisTelemetry_Printf(
         "\r\n==== 2026AGV chassis firmware | mode=%s | IMU=%s | CAN 1M ====\r\n"
         "Type H (or ?) + Enter for help. Status line every %lu ms (D0 = off).\r\n",
-        AGV_MODE == AGV_MODE_COMMAND  ? "COMMAND"
-        : AGV_MODE == AGV_MODE_SURVEY ? "SURVEY"
-                                      : "COMPETITION",
-        CHASSIS_USE_IMU ? "HWT101" : "OFF(wheel odometry)", (unsigned long)report_period_ms);
+        AGV_MODE_NAME, CHASSIS_USE_IMU ? "HWT101" : "OFF(wheel odometry)",
+        (unsigned long)report_period_ms);
+}
+
+void ChassisTelemetry_SendRoute(unsigned count, telemetry_route_point point)
+{
+    route_point = point;
+    route_total = count;
+    route_line = 0U;
+}
+
+static void SendRouteLine(uint32_t now)
+{
+    if (!route_point || now == route_ms || TxFree() < TX_RING_SIZE / 2U)
+        return;
+    route_ms = now;
+    if (route_line == 0U)
+        ChassisTelemetry_Printf("ROUTE points %u\r\n", route_total);
+    else if (route_line <= route_total)
+    {
+        MapPoint p = route_point(route_line - 1U);
+        ChassisTelemetry_Printf("ROUTE %u %ld %ld\r\n", route_line - 1U, (long)p.x, (long)p.y);
+    }
+    else
+    {
+        ChassisTelemetry_Printf("ROUTE end\r\n");
+        route_point = NULL;
+    }
+    ++route_line;
 }
 
 void ChassisTelemetry_Help(void)
@@ -257,10 +290,11 @@ void ChassisTelemetry_Info(void)
     uint32_t now = HAL_GetTick();
     ChassisTelemetry_Printf("---- info @ %s s ----\r\n", Num((float)now * 0.001f, 3));
     ChassisTelemetry_Printf("chassis: state=%s mode=%s speed_limit=%smm/s cycle=%lu jitter=%luus "
-                            "dt=%sms\r\n",
+                            "loop=%luus dt=%sms\r\n",
                             StateName(chassis.state), ModeName(chassis.mode),
                             Num(Chassis_SpeedLimit(), 0), (unsigned long)chassis.cycle,
-                            (unsigned long)chassis.jitter_us, Num(chassis.dt_actual * 1000.0f, 2));
+                            (unsigned long)chassis.jitter_us, (unsigned long)chassis.loop_peak_us,
+                            Num(chassis.dt_actual * 1000.0f, 2));
     ChassisTelemetry_Printf("waiting/fault flags:%s\r\n", ReasonText(Chassis_WaitReason()));
     if (chassis.state == CHASSIS_STATE_FAULT)
         ChassisTelemetry_Printf("fault: %s\r\n", FaultText());
@@ -296,6 +330,11 @@ void ChassisTelemetry_Info(void)
 void ChassisTelemetry_SetRate(unsigned hz)
 {
     report_period_ms = hz ? 1000U / (hz > 10U ? 10U : hz) : 0U;
+}
+
+uint8_t ChassisTelemetry_Periodic(void)
+{
+    return report_period_ms != 0U;
 }
 
 void ChassisTelemetry_SetPlot(telemetry_plot group, unsigned hz)
@@ -351,6 +390,7 @@ void ChassisTelemetry_Init(UART_HandleTypeDef *uart)
     wheel_seq = chassis_wheel_result.seq;
     wheel_active = 0U;
     banner_done = 0U;
+    route_point = NULL;
 }
 
 void ChassisTelemetry_Ack(char command, HAL_StatusTypeDef result)
@@ -434,10 +474,13 @@ void ChassisTelemetry_Poll(void)
     {
         stats_seen = 1U;
         ChassisTelemetry_Printf(
-            "DONE path: time=%ss dist=%smm max_cross=%smm max_heading=%sdeg\r\n",
+            "DONE path: time=%ss dist=%smm max_cross=%smm max_heading=%sdeg jitter=%luus "
+            "loop=%luus\r\n",
             Num((float)chassis_path_result.elapsed_ms * 0.001f, 2),
             Num(chassis_path_result.distance_mm, 1), Num(chassis_path_result.max_cross_mm, 2),
-            Num(chassis_path_result.max_heading_deg, 2));
+            Num(chassis_path_result.max_heading_deg, 2),
+            (unsigned long)chassis_path_result.max_jitter_us,
+            (unsigned long)chassis_path_result.max_loop_us);
     }
     /* 单轮测试：每换一个轮子提示一次，让现场目测方向 */
     if (chassis_wheel_result.active != wheel_active)
@@ -484,5 +527,6 @@ void ChassisTelemetry_Poll(void)
         last_plot = now - (now - last_plot) % plot_period_ms;
         PrintPlot();
     }
+    SendRouteLine(now);
     TxKick();
 }

@@ -21,6 +21,11 @@
 #error Invalid AGV configuration
 #endif
 
+#define AGV_MODE_NAME                                                                              \
+    (AGV_MODE == AGV_MODE_COMMAND  ? "COMMAND"                                                     \
+     : AGV_MODE == AGV_MODE_SURVEY ? "SURVEY"                                                      \
+                                   : "COMPETITION")
+
 /* At startup front faces field +X. IMU zero is captured automatically. */
 #define AGV_START_DELAY_MS   3000U
 #define AGV_READY_TIMEOUT_MS 15000U // 等底盘 READY / 等 FollowPath 接受

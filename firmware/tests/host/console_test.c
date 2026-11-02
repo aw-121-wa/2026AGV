@@ -753,8 +753,17 @@ static void TestHelpTexts(void)
         assert(strstr(Output(), "/set <name> <value>"));
         assert(strstr(Output(), "/plot"));
         assert(strstr(Output(), "/reset"));
+        assert(strstr(Output(), "/mode"));
         assert(!strstr(Output(), "ERR"));
     }
+
+    /* 调试台用 /mode 认模式；指令模式没有地图，也就没有路线。 */
+    ClearOutput();
+    Line("/mode");
+    assert(strcmp(Output(), "OK   mode COMMAND\r\n") == 0);
+    ClearOutput();
+    Line("/route");
+    assert(strstr(Output(), "ERR  bad console command"));
 }
 
 static void TestPlotChannels(void)

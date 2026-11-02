@@ -4,10 +4,10 @@
 #include "map.h"
 #include "rplidar.h"
 
-/* 雷达障碍物识别（比赛模式）：
-   每个雷达点按当前位姿换算到场地坐标 → 去掉围挡、已知静态结构和已登记障碍附近的点 →
-   沿扫描顺序流式聚类 → 弦长约 Ø50 的簇外推出圆心 → 跨圈关联，连续命中 COMP_OBS_CONFIRM
-   圈才确认，确认后 Map_AddObstacle 写入栅格地图（地图版本号随之递增，旧路径自动作废）。 */
+/* 雷达障碍物识别（比赛模式）。开局在几个位置各停下来扫一次，之后不再处理雷达数据：
+   每个雷达点按位姿换算到场地坐标 → 去掉围挡和转盘上的点 → 沿扫描顺序流式聚类 → 簇外推出圆心 →
+   跨圈关联并平均。每次扫完调用 LidarObs_Finish，看到的圈数够多的目标写入栅格地图，写入后位置
+   不再变，和地图保持一致；后面的位置新看到的再追加。 */
 
 typedef struct
 {
@@ -38,10 +38,13 @@ void LidarObs_Init(void);
 /* 喂一个雷达采样；pose 为采样时刻的车体位姿。 */
 void LidarObs_Feed(const RPLidarSample *s, const LidarPose *pose);
 
-/* 读出已确认障碍物的圆心（场地坐标）；返回个数。 */
+/* 一次扫描结束：把看到足够圈数的目标写入地图（地图版本号随之递增），返回累计的障碍物个数。 */
+unsigned LidarObs_Finish(void);
+
+/* 读出 LidarObs_Finish 写入地图的障碍物圆心（场地坐标）；返回个数。 */
 unsigned LidarObs_List(MapPoint *out, unsigned max);
 
-/* 自上次调用以来是否有新确认的障碍物；有则返回 1 并把其中一个写入 *p。 */
+/* 还有没取走的新障碍物吗？有则返回 1 并把其中一个写入 *p，每个只给一次。 */
 uint8_t LidarObs_PopNew(MapPoint *p);
 
 #endif
