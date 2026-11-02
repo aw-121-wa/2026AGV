@@ -70,13 +70,12 @@ static const int8_t k_sign[CHASSIS_WHEEL_NUM][3] = {
 };
 
 chassis_t chassis;
+chassis_tuning chassis_tune = CHASSIS_TUNE_DEFAULTS;
+const chassis_tuning chassis_tune_default = CHASSIS_TUNE_DEFAULTS;
 static zdt_motor *wheel[CHASSIS_WHEEL_NUM];
 static uint32_t s_last_us;                    // 上一拍的时间戳
 static int16_t s_last_rpm[CHASSIS_WHEEL_NUM]; // 上次成功下发的轮速，0.1 RPM
 static uint8_t s_force_apply;                 // 1 = 下一拍无条件重发全部轮速
-static volatile uint8_t s_move_req;           // 1 = 有未处理的定距移动请求
-static volatile float s_move_forward;         // 请求的纵向距离，mm
-static volatile float s_move_left;            // 请求的横向距离，mm
 static uint32_t s_move_start_us;
 static uint32_t s_move_timeout_us = CHASSIS_MOVE_TIMEOUT_US;
 static uint32_t s_settle_us;
@@ -183,8 +182,8 @@ static float Chassis_Ramp(float cur, float tgt, float step)
 static void Chassis_Solve(const chassis_vel *v, int16_t out[CHASSIS_WHEEL_NUM])
 {
     /* 轮子转一圈移动 πD，mm/s -> 0.1 RPM */
-    const float rpm_x10_per_mmps = 600.0f * CHASSIS_GEAR_RATIO / (MATH_PI * CHASSIS_WHEEL_DIA_MM);
-    const float w_mm = CHASSIS_K_MM * v->wz * MATH_DEG_TO_RAD;
+    const float rpm_x10_per_mmps = 600.0f * CHASSIS_GEAR_RATIO / (MATH_PI * chassis_tune.wheel_dia);
+    const float w_mm = chassis_tune.chassis_k * v->wz * MATH_DEG_TO_RAD;
     float raw[CHASSIS_WHEEL_NUM];
     float peak = 0.0f;
 
@@ -344,7 +343,7 @@ static void Chassis_UpdateOdometry(void)
     {
         float deg = Chassis_WheelDeg(i);
         d[i] = (deg - s_prev_deg[i]) *
-               (MATH_PI * CHASSIS_WHEEL_DIA_MM / (360.0f * CHASSIS_GEAR_RATIO));
+               (MATH_PI * chassis_tune.wheel_dia / (360.0f * CHASSIS_GEAR_RATIO));
         s_prev_deg[i] = deg;
         s_prev_seq[i] = wheel[i]->position_seq;
         s_odom_sample_ms[i] = wheel[i]->position_ms;
@@ -360,7 +359,7 @@ static void Chassis_UpdateOdometry(void)
     float rad = chassis.yaw * MATH_DEG_TO_RAD;
 #else
     /* 无陀螺仪：dθ = Σ(k_sign[i][2]·d[i]) / (4K)，位移按中点航向旋转到世界系。 */
-    float dtheta = 0.25f * (-d[0] + d[1] - d[2] + d[3]) / CHASSIS_K_MM; // rad
+    float dtheta = 0.25f * (-d[0] + d[1] - d[2] + d[3]) / chassis_tune.chassis_k; // rad
     float rad = chassis.yaw * MATH_DEG_TO_RAD + 0.5f * dtheta;
     chassis.yaw = Math_WrapDeg(chassis.yaw + dtheta * MATH_RAD_TO_DEG);
 #endif
@@ -372,17 +371,19 @@ static void Chassis_UpdateOdometry(void)
 static float Chassis_HeadingControl(float dt, uint8_t stationary)
 {
     float error = chassis.heading_error;
-    if (stationary && fabsf(error) <= CHASSIS_HEADING_TOL_DEG)
+    if (stationary && fabsf(error) <= chassis_tune.heading_tol)
     {
         s_heading_integral = 0.0f;
         return 0.0f;
     }
-    if (fabsf(error) < CHASSIS_HEADING_I_ZONE)
-        s_heading_integral =
-            Math_Clamp(s_heading_integral + CHASSIS_HEADING_KI * error * dt, CHASSIS_HEADING_I_MAX);
+    /* KI 调成 0 时积分一起清掉，旧的修正量不留在输出里。 */
+    if (fabsf(error) < chassis_tune.heading_i_zone && chassis_tune.heading_ki > 0.0f)
+        s_heading_integral = Math_Clamp(s_heading_integral + chassis_tune.heading_ki * error * dt,
+                                        chassis_tune.heading_i_max);
     else
         s_heading_integral = 0.0f;
-    return Math_Clamp(CHASSIS_HEADING_KP * error + s_heading_integral, CHASSIS_TURN_MAX_SPEED);
+    return Math_Clamp(chassis_tune.heading_kp * error + s_heading_integral,
+                      chassis_tune.turn_max_speed);
 }
 
 #include "chassis_path.inc"
@@ -395,16 +396,16 @@ static void Chassis_AutoControl(float dt, uint32_t now)
     float distance = hypotf(ex, ey);
     chassis.heading_error = Math_WrapDeg(chassis.heading_target - chassis.yaw);
     float vx = 0.0f, vy = 0.0f;
-    if (chassis.mode == CHASSIS_MODE_MOVE && distance > CHASSIS_DISTANCE_TOL_MM)
+    if (chassis.mode == CHASSIS_MODE_MOVE && distance > chassis_tune.distance_tol)
     {
-        float speed = fminf(CHASSIS_DISTANCE_KP * distance, s_move_speed_limit);
+        float speed = fminf(chassis_tune.distance_kp * distance, s_move_speed_limit);
         float rad = chassis.yaw * MATH_DEG_TO_RAD;
         vx = speed * (cosf(rad) * ex + sinf(rad) * ey) / distance;
         vy = speed * (-sinf(rad) * ex + cosf(rad) * ey) / distance;
     }
     chassis.target.vx = vx;
     chassis.target.vy = vy;
-    uint8_t stationary = chassis.mode == CHASSIS_MODE_TURN || distance <= CHASSIS_DISTANCE_TOL_MM;
+    uint8_t stationary = chassis.mode == CHASSIS_MODE_TURN || distance <= chassis_tune.distance_tol;
     chassis.target.wz = Chassis_HeadingControl(dt, stationary);
     if (!stationary)
     {
@@ -414,8 +415,8 @@ static void Chassis_AutoControl(float dt, uint32_t now)
         if (error > CHASSIS_DYNAMIC_TOL_DEG)
             ++chassis.heading_over_limit;
     }
-    uint8_t settled = fabsf(chassis.heading_error) <= CHASSIS_HEADING_TOL_DEG &&
-                      (chassis.mode == CHASSIS_MODE_TURN || distance <= CHASSIS_DISTANCE_TOL_MM);
+    uint8_t settled = fabsf(chassis.heading_error) <= chassis_tune.heading_tol &&
+                      (chassis.mode == CHASSIS_MODE_TURN || distance <= chassis_tune.distance_tol);
     for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM; ++i)
         if (fabsf(Chassis_WheelRpm(i)) > 2.0f)
             settled = 0U;
@@ -425,7 +426,7 @@ static void Chassis_AutoControl(float dt, uint32_t now)
         s_settle_us = 0U;
     if (now - s_move_start_us > s_move_timeout_us)
         Chassis_Fault(CHASSIS_FAULT_MOVE_TIMEOUT, 0U);
-    else if (s_settle_us >= CHASSIS_SETTLE_US)
+    else if (s_settle_us >= (uint32_t)(chassis_tune.settle_ms * 1000.0f))
     {
         Chassis_Stop();
         s_heading_hold = 1U; // 正常完成后保持原目标；显式 S/故障停止仍完全撤去控制
@@ -566,7 +567,6 @@ HAL_StatusTypeDef Chassis_Init(FDCAN_HandleTypeDef *hfdcan)
     chassis.state = CHASSIS_STATE_IDLE; // 由 Chassis_Update 负责使能后再进 READY
     chassis.mode = CHASSIS_MODE_VEL;
     s_force_apply = 0U;
-    s_move_req = 0U;
     s_last_us = Chassis_Micros();
     return HAL_OK;
 }
@@ -625,13 +625,6 @@ void Chassis_Update(void)
         Chassis_Apply();
         return;
     }
-    critical_state irq = Critical_Enter();
-    uint8_t pending = s_move_req;
-    float forward = s_move_forward, left = s_move_left;
-    s_move_req = 0U;
-    Critical_Exit(irq);
-    if (pending)
-        (void)Chassis_MoveDistance(forward, left);
     if (chassis.mode == CHASSIS_MODE_WHEEL)
     {
         Chassis_WheelControl(); // 直接给单轮转速，不经过斜坡和运动学
@@ -649,9 +642,10 @@ void Chassis_Update(void)
     }
 
     /* ---- 7. 目标速度斜坡，步长用实测 dt ---- */
-    float step_ang = CHASSIS_ACC_ANGULAR * dt;
-    chassis.current.vx = Chassis_Ramp(chassis.current.vx, chassis.target.vx, CHASSIS_ACC_FWD * dt);
-    chassis.current.vy = Chassis_Ramp(chassis.current.vy, chassis.target.vy, CHASSIS_ACC_LAT * dt);
+    float step_lin = chassis_tune.acc_linear * dt;
+    float step_ang = chassis_tune.acc_angular * dt;
+    chassis.current.vx = Chassis_Ramp(chassis.current.vx, chassis.target.vx, step_lin);
+    chassis.current.vy = Chassis_Ramp(chassis.current.vy, chassis.target.vy, step_lin);
     chassis.current.wz = Chassis_Ramp(chassis.current.wz, chassis.target.wz, step_ang);
 
     /* ---- 8. 解算 + 限幅 ---- */
@@ -692,7 +686,6 @@ void Chassis_Stop(void)
     memset(&chassis.current, 0, sizeof(chassis.current));
     memset(chassis.wheel_rpm_x10, 0, sizeof(chassis.wheel_rpm_x10));
     memset(s_last_rpm, 0, sizeof(s_last_rpm));
-    s_move_req = 0U; // 丢掉还没执行的移动请求
     chassis.mode = CHASSIS_MODE_VEL;
     s_force_apply = 1U;
     s_settle_us = 0U;
@@ -777,15 +770,3 @@ HAL_StatusTypeDef Chassis_TurnBy(float degrees)
     return Chassis_StartMotion(CHASSIS_MODE_TURN, chassis.yaw + degrees);
 }
 
-/* 中断安全的单槽请求：只登记一次移动目标，由主循环取走执行。 */
-void Chassis_MoveRequest(float forward_mm, float left_mm)
-{
-    critical_state irq = Critical_Enter();
-    if (!s_move_req)
-    {
-        s_move_forward = forward_mm;
-        s_move_left = left_mm;
-        s_move_req = 1U;
-    }
-    Critical_Exit(irq);
-}

@@ -42,6 +42,17 @@ HAL_StatusTypeDef Comp_Init(unsigned zone)
     return HAL_OK;
 }
 
+/* 记下当前里程计读数，从现在起 home 对应当前位置，origin_yaw 对应场地航向 0。 */
+static void Anchor(float heading_deg)
+{
+    origin_x = chassis.pos_x;
+    origin_y = chassis.pos_y;
+    origin_yaw = chassis.yaw - heading_deg;
+    cs = cosf(origin_yaw * MATH_DEG_TO_RAD);
+    sn = sinf(origin_yaw * MATH_DEG_TO_RAD);
+    comp.anchored = 1;
+}
+
 /* 与跑图模式相同的约定：底盘 READY 后记下里程计原点和航向零点，之后换算到场地坐标。 */
 static void UpdatePose(uint32_t now)
 {
@@ -49,12 +60,7 @@ static void UpdatePose(uint32_t now)
     {
         if (chassis.state != CHASSIS_STATE_READY || now - boot_ms < AGV_START_DELAY_MS)
             return;
-        origin_x = chassis.pos_x;
-        origin_y = chassis.pos_y;
-        origin_yaw = chassis.yaw;
-        cs = cosf(origin_yaw * MATH_DEG_TO_RAD);
-        sn = sinf(origin_yaw * MATH_DEG_TO_RAD);
-        comp.anchored = 1;
+        Anchor(0.0f);
         ChassisTelemetry_Printf("COMP pose anchored at (%ld,%ld)\r\n", (long)home.x,
                                 (long)home.y);
     }
@@ -176,6 +182,28 @@ static void AcceptTask(const char *text, unsigned len, const char *source)
                             (unsigned)code.storage_ring[1][1], (unsigned)code.storage_ring[1][2]);
 }
 
+void Comp_InjectTask(const char *text, unsigned len)
+{
+    AcceptTask(text, len, "console");
+}
+
+void Comp_ClearObstacles(void)
+{
+    Map_Init();
+    LidarObs_Init();
+    comp.obstacles = 0;
+    obstacles_dirty = 1;
+}
+
+HAL_StatusTypeDef Comp_SetPose(float x_mm, float y_mm, float heading_deg)
+{
+    if (chassis.state != CHASSIS_STATE_READY)
+        return HAL_BUSY;
+    home = (MapPoint){(int32_t)lroundf(x_mm), (int32_t)lroundf(y_mm)};
+    Anchor(heading_deg);
+    return HAL_OK;
+}
+
 static void ScannerTick(uint32_t now)
 {
     uint8_t buf[64];
@@ -238,33 +266,8 @@ static void VisionTick(uint32_t now)
     }
 }
 
-/* 定点打印一位小数（ChassisTelemetry 的 printf 不保证支持 %f）。 */
-static const char *Fix1(char *buf, float v)
-{
-    long t = lroundf(v * 10.0f);
-    char sign = t < 0 ? '-' : 0;
-    if (t < 0)
-        t = -t;
-    char *p = buf;
-    if (sign)
-        *p++ = sign;
-    long ip = t / 10;
-    char tmp[12];
-    int n = 0;
-    do
-        tmp[n++] = (char)('0' + ip % 10);
-    while ((ip /= 10) > 0 && n < 11);
-    while (n)
-        *p++ = tmp[--n];
-    *p++ = '.';
-    *p++ = (char)('0' + t % 10);
-    *p = 0;
-    return buf;
-}
-
 static void Report(uint32_t now)
 {
-    char yaw[16], hz[16];
     if (now - report_ms < COMP_REPORT_PERIOD_MS)
         return;
     report_ms = now;
@@ -274,8 +277,8 @@ static void Report(uint32_t now)
         "COMP pose=(%ld,%ld,%s) lidar=%s %sHz pts=%lu used=%lu clu=%lu "
         "obs=%u rs=%lu/%lu | vision=%s mode=%u mat=%u ring=%u%s crc=%lu | "
         "task=%s rej=%lu scan=%lu/%lu\r\n",
-        (long)lroundf(comp.x), (long)lroundf(comp.y), Fix1(yaw, comp.heading_deg),
-        lidar_text[comp.lidar_state], Fix1(hz, comp.lidar_hz),
+        (long)lroundf(comp.x), (long)lroundf(comp.y), ChassisTelemetry_Num(comp.heading_deg, 1),
+        lidar_text[comp.lidar_state], ChassisTelemetry_Num(comp.lidar_hz, 1),
         (unsigned long)lidar_obs.points, (unsigned long)lidar_obs.used,
         (unsigned long)lidar_obs.clusters, (unsigned)comp.obstacles,
         (unsigned long)comp.lidar_restarts, (unsigned long)parser.resync,

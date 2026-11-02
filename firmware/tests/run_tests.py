@@ -27,6 +27,7 @@ SUITES = {
     'survey_test': ['User/Navigation/survey.c'],
     'agv_test': NAV + ['User/App/agv_run.c'],
     'task_test': ['User/App/task_code.c'],
+    'console_test': [],
     'comp_test': ['User/Navigation/map.c', 'User/Navigation/lidar_obstacle.c',
                   'User/Drivers/RPLidar/rplidar.c', 'User/Comm/vision_link.c'],
 }
@@ -45,9 +46,12 @@ def main():
         run(name, sources)
     run('bench_test@imu', [])
     run('bench_test@noimu', [], ['-DCHASSIS_USE_IMU=0'])
+    run('console_test@noimu', [], ['-DCHASSIS_USE_IMU=0'])
     for mode in range(3):
         run('mode_test@' + str(mode), [], ['-DAGV_MODE=' + str(mode)])
+    run('survey_loop_test', NAV + ['User/App/agv_run.c'], ['-DAGV_MODE=1'])
     run('comp_task_test', ['User/App/competition.c', 'User/App/task_code.c',
+                           'User/Comm/console.c',
                            'User/Navigation/map.c', 'User/Navigation/lidar_obstacle.c',
                            'User/Drivers/RPLidar/rplidar.c', 'User/Comm/vision_link.c'],
         ['-DAGV_MODE=2'])

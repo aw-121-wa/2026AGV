@@ -57,9 +57,6 @@ uint8_t Map_WorldToGrid(int32_t x, int32_t y, uint16_t *row, uint16_t *col);
 /* 返回栅格中心的场地毫米坐标。 */
 uint8_t Map_GridToWorld(uint16_t row, uint16_t col, MapPoint *p);
 
-/* 检查轴对齐车身和指定额外余量。 */
-uint8_t Map_CanPose(float x, float y, float margin);
-
 /* 检查带朝向车身的保守外接矩形。 */
 uint8_t Map_CanPoseHeading(float x, float y, float heading_deg, float margin);
 

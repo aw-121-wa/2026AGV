@@ -180,16 +180,19 @@ static float Noise(float amp)
     return ((float)((rng >> 8) & 0xFFFF) / 65535.0f * 2.0f - 1.0f) * amp;
 }
 
+/* 雷达在仿真车上的真实安装位置，默认与配置一致。 */
+static float mount_x = COMP_LIDAR_X_MM, mount_y = COMP_LIDAR_Y_MM, mount_yaw = COMP_LIDAR_YAW_DEG;
+
 static void RunScans(const LidarPose *pose, const Cyl *c, unsigned nc, unsigned scans)
 {
     for (unsigned k = 0; k < scans; ++k)
         for (unsigned i = 0; i < 500; ++i) // 0.72° 分辨率
         {
             float a = i * 0.72f + 0.3f * (k & 1);
-            float world = (pose->heading_deg + COMP_LIDAR_YAW_DEG - a) * MATH_DEG_TO_RAD;
+            float world = (pose->heading_deg + mount_yaw - a) * MATH_DEG_TO_RAD;
             float hr = pose->heading_deg * MATH_DEG_TO_RAD;
-            float ox = pose->x + cosf(hr) * COMP_LIDAR_X_MM - sinf(hr) * COMP_LIDAR_Y_MM;
-            float oy = pose->y + sinf(hr) * COMP_LIDAR_X_MM + cosf(hr) * COMP_LIDAR_Y_MM;
+            float ox = pose->x + cosf(hr) * mount_x - sinf(hr) * mount_y;
+            float oy = pose->y + sinf(hr) * mount_x + cosf(hr) * mount_y;
             float d = Raycast(ox, oy, cosf(world), sinf(world), c, nc);
             RPLidarSample s = {a, d > 12000 ? 0 : d + Noise(15.0f), 47, i == 0};
             LidarObs_Feed(&s, pose);
@@ -242,12 +245,123 @@ static void TestObstacles(void)
     printf("lidar obstacle OK\n");
 }
 
+/* 改运行时参数后，真实的识别结果要跟着变。三个圆柱离车分别约 500、520、900 mm。 */
+static unsigned CountObstacles(unsigned scans, MapPoint *list)
+{
+    static const Cyl cyl[] = {{1200, 1700, 25}, {1720, 1180, 25}, {300, 1200, 25}};
+    LidarPose pose = {1200, 1200, 30.0f};
+    RunScans(&pose, cyl, 3, scans);
+    return LidarObs_List(list, 16);
+}
+
+static void BeginTuning(void)
+{
+    Map_Init();
+    LidarObs_Init();
+    lidar_tune = lidar_tune_default;
+    mount_x = COMP_LIDAR_X_MM;
+    mount_y = COMP_LIDAR_Y_MM;
+    mount_yaw = COMP_LIDAR_YAW_DEG;
+}
+
+static void TestLidarTuning(void)
+{
+    MapPoint list[16];
+    BeginTuning();
+    assert(CountObstacles(3, list) == 0); // 默认要连续 4 圈
+    BeginTuning();
+    lidar_tune.obs_confirm = 2.0f;
+    assert(CountObstacles(3, list) == 3);
+
+    BeginTuning();
+    lidar_tune.lidar_min = 600.0f; // 只剩 900 mm 那个
+    assert(CountObstacles(8, list) == 1 && fabsf((float)list[0].x - 300.0f) < 20.0f);
+    BeginTuning();
+    lidar_tune.lidar_max = 600.0f; // 去掉 900 mm 那个
+    assert(CountObstacles(8, list) == 2);
+
+    BeginTuning();
+    lidar_tune.obs_width = 10.0f; // Ø50 的簇都比这宽
+    assert(CountObstacles(8, list) == 0);
+    BeginTuning();
+    lidar_tune.obs_gap = 1.0f; // 相邻点都被拆开，凑不成簇
+    assert(CountObstacles(8, list) == 0);
+    BeginTuning();
+    lidar_tune.obs_match = 0.1f; // 测距噪声下每圈的圆心都对不上
+    assert(CountObstacles(8, list) == 0);
+
+    /* 雷达实际装在车体前 100、左 40 mm，转了 90°：参数没跟上时位置全错，改对后回到真值。 */
+    BeginTuning();
+    mount_x = 100.0f;
+    mount_y = 40.0f;
+    mount_yaw = 90.0f;
+    unsigned wrong = CountObstacles(8, list);
+    float far_off = 0.0f;
+    for (unsigned i = 0; i < wrong; ++i)
+        far_off = fmaxf(far_off, hypotf((float)list[i].x - 1200.0f, (float)list[i].y - 1700.0f));
+    assert(wrong != 3 || far_off > 100.0f);
+
+    BeginTuning();
+    mount_x = lidar_tune.lidar_x = 100.0f;
+    mount_y = lidar_tune.lidar_y = 40.0f;
+    mount_yaw = lidar_tune.lidar_yaw = 90.0f;
+    static const float truth[3][2] = {{1200, 1700}, {1720, 1180}, {300, 1200}};
+    assert(CountObstacles(8, list) == 3);
+    for (unsigned j = 0; j < 3; ++j)
+    {
+        float best = 1e9f;
+        for (unsigned i = 0; i < 3; ++i)
+            best = fminf(best, hypotf((float)list[i].x - truth[j][0], (float)list[i].y - truth[j][1]));
+        assert(best < 20.0f);
+    }
+    BeginTuning();
+    printf("lidar tuning OK\n");
+}
+
+/* 无噪声的一小段弧：雷达 0° 方向 ±2°，距离 300 mm。 */
+static void FeedArc(const LidarPose *pose, unsigned scans)
+{
+    for (unsigned k = 0; k < scans; ++k)
+        for (int a = -2; a <= 2; ++a)
+        {
+            RPLidarSample s = {(float)(a < 0 ? a + 360 : a), 300.0f, 47, a == -2};
+            LidarObs_Feed(&s, pose);
+        }
+}
+
+/* 圆心沿视线外推，视线要从雷达算起，不是从车体中心。外推量 25 × 2/π = 15.9 mm。 */
+static void TestSightLineStartsAtLidar(void)
+{
+    MapPoint list[16];
+
+    /* 雷达在车左 150 mm、朝车头看：视线沿 +X，y 不偏。从车体中心算会偏 7 mm。
+       弧放在十字通道中间，离四个岛够远，不被静态结构过滤。 */
+    LidarPose left_mount = {1200, 1050, 0.0f};
+    BeginTuning();
+    lidar_tune.lidar_y = 150.0f;
+    FeedArc(&left_mount, 6);
+    assert(LidarObs_List(list, 16) == 1);
+    assert(fabsf((float)list[0].x - 1516.0f) <= 1.0f && fabsf((float)list[0].y - 1200.0f) <= 1.0f);
+
+    /* 雷达在车前 150 mm、转 90° 朝车左看：视线沿 +Y，x 不偏。 */
+    LidarPose front_mount = {1050, 1200, 0.0f};
+    BeginTuning();
+    lidar_tune.lidar_x = 150.0f;
+    lidar_tune.lidar_yaw = 90.0f;
+    FeedArc(&front_mount, 6);
+    assert(LidarObs_List(list, 16) == 1);
+    assert(fabsf((float)list[0].x - 1200.0f) <= 1.0f && fabsf((float)list[0].y - 1516.0f) <= 1.0f);
+    BeginTuning();
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     TestParser();
     TestVisionLink();
     TestObstacles();
+    TestLidarTuning();
+    TestSightLineStartsAtLidar();
     printf("comp_test OK\n");
     return 0;
 }

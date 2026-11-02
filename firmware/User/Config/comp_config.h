@@ -6,7 +6,8 @@
 
 /* ---------------- RPLIDAR C1 ----------------
    USART1：PA9 = MCU TX → 雷达 RX，PA10 = MCU RX ← 雷达 TX；460800 8N1，3.3V 电平。
-   雷达 5V 单独供电（电机 + 测距核心约 230 mA），GND 与 MCU 共地。 */
+   雷达用单独一路 5V（电机 + 测距核心约 230 mA），但要从同一块电池稳压来，规则只允许一个电源；
+   GND 与 MCU 共地。 */
 #define COMP_LIDAR_BAUD 460800U
 
 /* 安装位置（车体系：原点 = 车体中心，x 向车头，y 向车左，mm）。
@@ -22,7 +23,7 @@
 #define COMP_LIDAR_YAW_DEG 0.0f
 #endif
 
-#define COMP_LIDAR_MIN_MM       160.0f // 更近的点视为车体 / 夹爪自身遮挡
+#define COMP_LIDAR_MIN_MM       200.0f // 更近的点视为车体自身：270 mm 车身的半对角线是 191 mm
 #define COMP_LIDAR_MAX_MM       1800.0f // C1 精度 ±30 mm，更远的点不参与识别
 #define COMP_LIDAR_BOOT_MS      600U   // 上电后等雷达自检完成再发命令
 #define COMP_LIDAR_STOP_MS      20U    // STOP 之后隔多久再发 SCAN

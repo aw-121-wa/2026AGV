@@ -8,6 +8,7 @@
 // A/T 支持最多三位小数，如 A0.125；毫米距离仍使用整数。
 // 多条命令以空格或换行分隔；兼容一帧一条且无换行。运动中新命令排队追加到当前路径，
 // 整行校验通过才提交（错误行不会执行半条路径）；S 立即停车并丢弃本行剩余内容。
+// 行首是 / 的一行是控制台命令，交给 console.c。
 HAL_StatusTypeDef ChassisCmd_Init(UART_HandleTypeDef *huart);
 // 最近命令结果，供调试器观察；BUSY 表示尚未就绪或正在运动。
 extern HAL_StatusTypeDef chassis_cmd_status;

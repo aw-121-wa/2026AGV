@@ -25,8 +25,12 @@ class FakeSerial:
 
 
 sys.modules['serial'] = types.SimpleNamespace(Serial=FakeSerial)
+# offset_to_target 不用 OpenCV，这台机器没装也能测。
+sys.modules.setdefault('cv2', types.SimpleNamespace())
+sys.modules.setdefault('numpy', types.SimpleNamespace())
 
 import config  # noqa: E402
+import ring_detect  # noqa: E402
 import stm32_link  # noqa: E402
 
 
@@ -55,12 +59,29 @@ def test_non_ascii_qr_text_does_not_raise():
     assert bytes(link.ser.sent[5:-1]) == b'??156'
 
 
+def test_ring_alignment_is_strict_enough_for_ring_1():
+    """1 环外径 = 物料最大径 + 3 mm，误差要小于 1.5 mm 才拿满分，斜向偏差也算。"""
+    config.TARGET_PX = (320, 240)
+    config.MM_PER_PX = 0.5
+
+    def aligned(dx_px, dy_px):
+        return ring_detect.offset_to_target((320 + dx_px, 240 + dy_px, 50, 3))[2]
+
+    assert aligned(0, 0)
+    assert aligned(2, 0)  # 1.0 mm
+    assert not aligned(3, 0)  # 1.5 mm，已经到 1 环的边
+    assert not aligned(2, 2)  # 每个方向 1 mm，合起来 1.41 mm
+    assert ring_detect.offset_to_target((324, 234, 50, 3))[:2] == (2.0, -3.0)
+
+
 def main():
     test_color_numbers_match_rules()
     test_task_frame_matches_firmware()
     test_task_text_fits_frame()
     test_non_ascii_qr_text_does_not_raise()
-    print('PASS: vision colour numbers, TASK frame bytes, long and non-ASCII QR text')
+    test_ring_alignment_is_strict_enough_for_ring_1()
+    print('PASS: vision colour numbers, TASK frame bytes, long and non-ASCII QR text, ring '
+          'alignment tolerance')
 
 
 if __name__ == '__main__':

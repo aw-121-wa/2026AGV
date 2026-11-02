@@ -78,15 +78,32 @@ uint32_t HAL_UARTEx_GetRxEventType(UART_HandleTypeDef *u)
     (void)u;
     return HAL_UART_RXEVENT_IDLE;
 }
+chassis_tuning chassis_tune = CHASSIS_TUNE_DEFAULTS;
+static unsigned console_calls;
+static char console_seen[64];
+void Console_Line(char *line)
+{
+    assert(strlen(line) < sizeof(console_seen));
+    strcpy(console_seen, line);
+    ++console_calls;
+}
 #include "../../User/Comm/chassis_cmd.c"
 int main(void)
 {
     UART_HandleTypeDef u = {0};
     assert(ChassisCmd_Init(&u) == HAL_OK);
+    /* 控制台行在三种模式下都可用，行里的 s 不触发停车。 */
+    static const char console_text[] = "/set heading_tol 2\r\n";
+    memcpy(rx_buf, console_text, sizeof(console_text) - 1U);
+    ChassisCmd_RxEvent(&u, sizeof(console_text) - 1U);
+    ChassisCmd_Poll();
+    assert(console_calls == 1U && strcmp(console_seen, "set heading_tol 2") == 0);
+    assert(stop_calls == 0U && latches == 0U);
+    /* 巡检模式路线固定，不接受手动运动；比赛模式还没有流程，可以手动开车调试。 */
     memcpy(rx_buf, "F100", 4);
     ChassisCmd_RxEvent(&u, 4);
     ChassisCmd_Poll();
-    assert(move_calls == (AGV_MODE == AGV_MODE_COMMAND ? 1U : 0U));
+    assert(move_calls == (AGV_MODE == AGV_MODE_SURVEY ? 0U : 1U));
     memcpy(rx_buf, "S", 1);
     ChassisCmd_RxEvent(&u, 1);
     ChassisCmd_Poll();
@@ -98,7 +115,6 @@ int main(void)
     memcpy(rx_buf, "\nW\n", 3); /* first \n ends the line discarded after the overflow */
     ChassisCmd_RxEvent(&u, 3);
     ChassisCmd_Poll();
-    assert(wheel_calls ==
-           (AGV_MODE == AGV_MODE_COMMAND ? 1U : 0U)); /* wheel test: command mode only */
+    assert(wheel_calls == (AGV_MODE == AGV_MODE_SURVEY ? 0U : 1U));
     printf("mode %d command gating/stop/overflow OK\n", AGV_MODE);
 }

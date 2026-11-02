@@ -2,6 +2,7 @@
 #include "critical.h"
 #include "chassis.h"
 #include "chassis_telemetry.h"
+#include "console.h"
 #include "agv_config.h"
 #include "user_math.h"
 #include <math.h>
@@ -28,13 +29,48 @@ static chassis_waypoint pending[CHASSIS_PATH_CAPACITY], planned;
 static unsigned pending_count;
 static uint8_t line_error, discard_line;
 
+/* 控制台行：行首是 '/' 的一整行交给 console.c，不走下面的单字母命令，里面的 S 也不算停车。
+   和单字母命令一样，CR、LF 或串口空闲都算行尾。 */
+#define CONSOLE_LINE_MAX 63U
+static char console_text[CONSOLE_LINE_MAX + 1U];
+static uint8_t console_len, console_active, console_too_long;
+
+static void ConsoleFeed(uint16_t ch)
+{
+    if (ch != CMD_END && ch != '\r' && ch != '\n')
+    {
+        if (console_len < CONSOLE_LINE_MAX)
+            console_text[console_len++] = (char)ch;
+        else
+            console_too_long = 1U;
+        return;
+    }
+    if (console_too_long)
+        ChassisTelemetry_Printf("ERR  console line too long, nothing executed\r\n");
+    else
+    {
+        console_text[console_len] = '\0';
+        Console_Line(console_text);
+    }
+    console_len = console_active = console_too_long = 0U;
+}
+
+static void StopRobot(void)
+{
+#if AGV_MODE != AGV_MODE_COMMAND
+    Agv_Stop();
+#else
+    Chassis_Stop();
+#endif
+}
+
 /* 整行校验通过才提交，避免错误行执行半条路径。 */
 static void Commit(void)
 {
     if (!pending_count && !line_error)
         return;
     if (chassis.mode == CHASSIS_MODE_VEL)
-        Chassis_SetMoveSpeedLimit(CHASSIS_COMMAND_SPEED_MM_S);
+        Chassis_SetMoveSpeedLimit(chassis_tune.cmd_speed);
     chassis_cmd_status = line_error ? HAL_ERROR
                                     : (chassis.mode == CHASSIS_MODE_PATH
                                            ? Chassis_AppendPath(pending, pending_count)
@@ -86,7 +122,7 @@ static void ExecuteMeta(void)
             ChassisTelemetry_Ack('D', HAL_ERROR);
         break;
     case 'W':
-#if AGV_MODE != AGV_MODE_COMMAND
+#if AGV_MODE == AGV_MODE_SURVEY
         chassis_cmd_status = HAL_BUSY;
 #else
         chassis_cmd_status = (!digits || value == 0U) ? Chassis_WheelTest(0x0FU)
@@ -100,14 +136,13 @@ static void ExecuteMeta(void)
     }
 }
 
-/* 校验解析结果并派发：F/B/L/R 定距、A 绝对航向、T 相对转向、S 停车，以及即时命令。 */
+/* 校验解析结果并派发：F/B/L/R 定距、A 绝对航向、T 相对转向，以及即时命令。S 在 Feed 里处理。 */
 static void Execute(void)
 {
     float x = (negative ? -(float)value : (float)value) / (float)divisor;
     uint8_t meta = IsMeta(direction);
-    uint8_t need_digits =
-        direction && direction != 'S' && direction != 'H' && direction != 'I' && direction != 'W';
-    uint8_t no_digits = direction == 'S' || direction == 'H' || direction == 'I';
+    uint8_t need_digits = direction && direction != 'H' && direction != 'I' && direction != 'W';
+    uint8_t no_digits = direction == 'H' || direction == 'I';
     if (invalid || !direction || (need_digits && !digits) || (decimal && !fractional) ||
         (no_digits && (digits || sign_seen)) || (meta && sign_seen))
     {
@@ -126,14 +161,10 @@ static void Execute(void)
         Reset();
         return;
     }
-#if AGV_MODE != AGV_MODE_COMMAND
-    if (direction == 'S')
-    {
-        Agv_Stop();
-        chassis_cmd_status = HAL_OK;
-    }
-    else
-        chassis_cmd_status = HAL_BUSY;
+    /* 巡检路线是固定的，不接受手动运动。比赛模式还没有比赛流程，可以手动开车做台架调试；
+       加上比赛流程后，运行中必须锁掉（规则禁止遥控）。 */
+#if AGV_MODE == AGV_MODE_SURVEY
+    chassis_cmd_status = HAL_BUSY;
     ChassisTelemetry_Ack(direction, chassis_cmd_status);
     Reset();
     (void)x;
@@ -170,10 +201,6 @@ static void Execute(void)
         if (pending_count)
             --pending_count;
         break;
-    case 'S':
-        Chassis_Stop();
-        chassis_cmd_status = HAL_OK;
-        break;
     default:
         chassis_cmd_status = HAL_ERROR;
         break;
@@ -192,17 +219,24 @@ static void Execute(void)
 /* 命令字状态机：逐字符累积方向字母、正负号和数字，遇到结束符就执行。 */
 static void Feed(uint16_t ch)
 {
+    if (console_active)
+    {
+        ConsoleFeed(ch);
+        return;
+    }
+    /* 这一行前面没有任何内容才算控制台行。 */
+    if (ch == '/' && !direction && !invalid && !pending_count && !line_error && !discard_line)
+    {
+        console_active = 1U;
+        return;
+    }
     if (ch >= 'a' && ch <= 'z')
         ch -= 'a' - 'A';
     if (ch == '?')
         ch = 'H';
     if (ch == 'S')
     {
-#if AGV_MODE != AGV_MODE_COMMAND
-        Agv_Stop();
-#else
-        Chassis_Stop();
-#endif
+        StopRobot();
         pending_count = 0;
         line_error = 0;
         discard_line = 1;
@@ -230,7 +264,7 @@ static void Feed(uint16_t ch)
         return;
     }
     if (!direction && !invalid &&
-        (ch == 'F' || ch == 'B' || ch == 'L' || ch == 'R' || ch == 'A' || ch == 'T' || ch == 'S' ||
+        (ch == 'F' || ch == 'B' || ch == 'L' || ch == 'R' || ch == 'A' || ch == 'T' ||
          IsMeta((char)ch)))
     {
         direction = (char)ch;
@@ -310,11 +344,8 @@ void ChassisCmd_Poll(void)
         overflow = 0U;
         Critical_Exit(irq);
         Reset();
-#if AGV_MODE != AGV_MODE_COMMAND
-        Agv_Stop();
-#else
-        Chassis_Stop();
-#endif
+        console_len = console_active = console_too_long = 0U;
+        StopRobot();
         pending_count = 0;
         line_error = 0;
         discard_line = 1;

@@ -26,6 +26,8 @@ static char line[LINE_MAX];
 
 static uint32_t report_period_ms = 1000U; // 0 = 关闭周期状态行
 static uint32_t last_report;
+static telemetry_plot plot_group;
+static uint32_t plot_period_ms, last_plot;
 static uint8_t last_state = 0xFFU, last_fault;
 static uint8_t stats_seen, wheel_seq, wheel_active;
 static uint8_t banner_done;
@@ -93,9 +95,9 @@ void ChassisTelemetry_Printf(const char *format, ...)
     TxPut(line, (unsigned)n);
 }
 
-unsigned long ChassisTelemetry_Dropped(void)
+void ChassisTelemetry_Puts(const char *text)
 {
-    return tx_dropped;
+    TxPut(text, (unsigned)strlen(text));
 }
 
 /* 串口空闲时：先确认上一块已发完再前移 tail，然后把下一段连续数据交给 HAL。 */
@@ -232,7 +234,8 @@ static void PrintBanner(void)
 
 void ChassisTelemetry_Help(void)
 {
-    ChassisTelemetry_Printf(
+    /* 帮助文本超过 Printf 的单次上限，用 Puts。 */
+    ChassisTelemetry_Puts(
         "---- commands (case-insensitive, separate by space, end with Enter or just pause) ----\r\n"
         "  F<mm> B<mm> L<mm> R<mm>  move forward/back/left/right, 1..5000 mm, e.g. F300\r\n"
         "  T<deg>   turn relative, -180..180, up to 3 decimals, e.g. T90  T-45.5\r\n"
@@ -242,9 +245,11 @@ void ChassisTelemetry_Help(void)
         "  I        detailed info (IMU, each motor, CAN counters)\r\n"
         "  D<hz>    status line rate: D0 off, D1..D10 Hz\r\n"
         "  H or ?   this help\r\n"
-        "  Several moves on one line run in order: F300 L200 B300 R200\r\n"
+        "  /help    console: change parameters live, plot data, bench tools\r\n"
+        "  Several moves on one line run in order: F300 L200 B300 R200\r\n");
+    ChassisTelemetry_Printf(
         "  Move speed %s mm/s. Replies: OK / BUSY / ERR; 'DONE' when a path finishes.\r\n",
-        Num(CHASSIS_COMMAND_SPEED_MM_S, 0));
+        Num(chassis_tune.cmd_speed, 0));
 }
 
 void ChassisTelemetry_Info(void)
@@ -291,6 +296,47 @@ void ChassisTelemetry_Info(void)
 void ChassisTelemetry_SetRate(unsigned hz)
 {
     report_period_ms = hz ? 1000U / (hz > 10U ? 10U : hz) : 0U;
+}
+
+void ChassisTelemetry_SetPlot(telemetry_plot group, unsigned hz)
+{
+    plot_group = group;
+    plot_period_ms = hz ? 1000U / hz : 0U;
+}
+
+static void PrintPlot(void)
+{
+    if (plot_group == TELEMETRY_PLOT_HEADING)
+    {
+        ChassisTelemetry_Printf("plot:%s,%s,%s,%s,%s\r\n", Num(chassis.heading_target, 3),
+                                Num(chassis.yaw, 3), Num(chassis.heading_error, 3),
+                                Num(chassis.target.wz, 3), Num(chassis.current.wz, 3));
+    }
+    else if (plot_group == TELEMETRY_PLOT_SPEED)
+    {
+        /* 四轮实测转速按运动学正解换成车体速度，和里程计同一套符号。 */
+        const float *rpm = chassis.wheel_rpm_meas;
+        float mm_per_s = MATH_PI * chassis_tune.wheel_dia / (60.0f * CHASSIS_GEAR_RATIO);
+        float vx = 0.25f * mm_per_s * (rpm[0] + rpm[1] + rpm[2] + rpm[3]);
+        float vy = 0.25f * mm_per_s * (-rpm[0] + rpm[1] + rpm[2] - rpm[3]);
+        ChassisTelemetry_Printf("plot:%s,%s,%s,%s,%s,%s\r\n", Num(chassis.target.vx, 1),
+                                Num(chassis.target.vy, 1), Num(chassis.current.vx, 1),
+                                Num(chassis.current.vy, 1), Num(vx, 1), Num(vy, 1));
+    }
+    else if (plot_group == TELEMETRY_PLOT_WHEELS)
+    {
+        ChassisTelemetry_Printf(
+            "plot:%s,%s,%s,%s,%s,%s,%s,%s\r\n", Num(chassis.wheel_rpm_x10[0] * 0.1f, 1),
+            Num(chassis.wheel_rpm_x10[1] * 0.1f, 1), Num(chassis.wheel_rpm_x10[2] * 0.1f, 1),
+            Num(chassis.wheel_rpm_x10[3] * 0.1f, 1), Num(chassis.wheel_rpm_meas[0], 1),
+            Num(chassis.wheel_rpm_meas[1], 1), Num(chassis.wheel_rpm_meas[2], 1),
+            Num(chassis.wheel_rpm_meas[3], 1));
+    }
+}
+
+const char *ChassisTelemetry_Num(float value, unsigned decimals)
+{
+    return Num(value, decimals);
 }
 
 void ChassisTelemetry_Init(UART_HandleTypeDef *uart)
@@ -431,6 +477,12 @@ void ChassisTelemetry_Poll(void)
     {
         last_report = now;
         PrintStatus(now);
+    }
+    if (plot_group != TELEMETRY_PLOT_OFF && now - last_plot >= plot_period_ms)
+    {
+        /* 保留相位：周期不是节拍整数倍时平均频率仍然准；落后再多也不补发。 */
+        last_plot = now - (now - last_plot) % plot_period_ms;
+        PrintPlot();
     }
     TxKick();
 }

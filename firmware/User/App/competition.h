@@ -51,4 +51,12 @@ void Comp_Tick(void);
 /* 切换视觉任务，立即下发给上位机。color 为 VisionColor，0 = 任意。 */
 void Comp_SetVisionMode(VisionMode mode, uint8_t color);
 
+/* 台架调试入口（串口控制台 /task /obs /pose），都只在底盘任务里调用。 */
+/* 把文本当成扫到的任务码处理；text 以 NUL 结尾。 */
+void Comp_InjectTask(const char *text, unsigned len);
+/* 清掉已识别的障碍物并重建地图，要几毫秒，只在停车时调用。 */
+void Comp_ClearObstacles(void);
+/* 把当前位置和朝向设为给定的场地位姿，之后按里程计累加。底盘没 READY 时返回 HAL_BUSY。 */
+HAL_StatusTypeDef Comp_SetPose(float x_mm, float y_mm, float heading_deg);
+
 #endif

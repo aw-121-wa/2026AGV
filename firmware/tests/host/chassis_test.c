@@ -147,6 +147,7 @@ uint32_t HAL_UARTEx_GetRxEventType(UART_HandleTypeDef *u)
 #include "../../User/Chassis/chassis.c"
 #include "../../User/Comm/chassis_telemetry.c"
 #include "../../User/Comm/chassis_cmd.c"
+#include "../../User/Comm/console.c"
 void HWT101_RxEvent(UART_HandleTypeDef *u, uint16_t n)
 {
     (void)u;
@@ -454,7 +455,8 @@ int main(void)
     assert(chassis.state == CHASSIS_STATE_FAULT);
     tick(1);
     command(&uart, "S\n");
-    Chassis_MoveRequest(100, 0);
+    tick(1);
+    assert(Chassis_MoveDistance(100, 0) == HAL_OK);
     tick(1);
     assert(chassis.mode == CHASSIS_MODE_MOVE);
     command(&uart, "S\n");

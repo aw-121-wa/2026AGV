@@ -5,7 +5,7 @@ STM32H750 + FreeRTOS 麦克纳姆轮 AGV 固件。
 - 底盘：4 台 ZDT_X42S 二代闭环步进（X 固件协议），经 FDCAN2 以 1 Mbps 驱动，轮速同步缓存 + 广播触发。
 - 姿态：HWT101 陀螺仪，UART5 + DMA 循环接收，帧校验后得到航向角。
 - 导航：2400 × 2400 mm 栅格地图（构型空间位图）+ 分步 A* + 中国邮路（奇度点匹配 + Hierholzer）生成覆盖 12 条通道的巡检回路；整圈用一条连续路径执行，不在每个航点停车。
-- 交互：USART6 一条串口同时做命令输入和文本状态输出，直接用串口助手，不需要上位机。
+- 交互：USART6 一条串口同时做命令输入和文本状态输出，串口助手就能用；调参和看曲线可以用带界面的调试台 `tools/agv_console.html`（4.5 节）。
 
 ---
 
@@ -19,7 +19,7 @@ Flash 128 KB，DTCM 128 KB，AXI SRAM（`0x24000000`）512 KB，SRAM1~3（`0x300
 
 | 外设 | 引脚 | 参数 | 用途 | 中断 / DMA |
 |---|---|---|---|---|
-| **USART6** | PC6 = TX，PC7 = RX | 115200 8N1，无流控 | **命令 + 文本输出**：串口助手直接收发（见第 4 节），不需要上位机 | USART6_IRQn 优先级 6；收发都用中断（`ReceiveToIdle_IT` / `Transmit_IT`），不占 DMA |
+| **USART6** | PC6 = TX，PC7 = RX | 115200 8N1，无流控 | **命令 + 文本输出**：串口助手或调试台收发（见第 4 节） | USART6_IRQn 优先级 6；收发都用中断（`ReceiveToIdle_IT` / `Transmit_IT`），不占 DMA |
 | **UART5** | PC12 = TX，PD2 = RX | 115200 8N1 | **HWT101 陀螺仪**专用，只收不发（TX 预留） | UART5_IRQn 优先级 6 + DMA1_Stream0 循环模式 + 空闲中断；DMA 缓冲 256 B 固定放 RAM_D2 |
 | **FDCAN2** | PB12 = RX，PB13 = TX | 经典 CAN，**1 Mbps**，扩展帧 | 4 台 ZDT_X42S 电机；不设硬件滤波器，地址在任务里过滤 | FDCAN2_IT0 优先级 5；RX FIFO0 16 帧、TX FIFO 队列 16 帧 |
 | **TIM6** | — | 1 ms 周期 | HAL 时基（`HAL_GetTick()` / `uwTick`） | TIM6_DAC_IRQn 优先级 15 |
@@ -64,7 +64,8 @@ tests/host/                   PC 端单元测试 + 假 HAL
 | `User/Chassis/chassis.c` | 底盘：DWT 微秒时基、四轮 X 型运动学（含等比限幅）、四轮位置差分里程计、状态机（IDLE/READY/FAULT）、速度斜坡、使能与丢帧重发、定距/转向闭环、航向 PI |
 | `User/Chassis/chassis_path.inc` | 连续航点跟踪（**被 `chassis.c` include，不单独编译**）：贝塞尔拐角过渡、按剩余距离限速、航点推进、偏线/里程/航向统计 |
 | `User/Comm/chassis_cmd.c` | 命令解析：字符状态机（支持一帧拆包、`\r\n`/空格/空闲结束）、整行校验通过才提交、`S` 立即停车/清故障、`W/I/D/H` 即时命令、环形接收队列与溢出处理 |
-| `User/Comm/chassis_telemetry.c` | 串口文本输出：2 KB 环形发送缓冲 + 中断分块发送；开机信息、状态变化、命令回执、周期状态行、路径完成统计、单轮测试结果、帮助与诊断 |
+| `User/Comm/chassis_telemetry.c` | 串口文本输出：2 KB 环形发送缓冲 + 中断分块发送；开机信息、状态变化、命令回执、周期状态行、路径完成统计、单轮测试结果、帮助与诊断、绘图数据流 |
+| `User/Comm/console.c` | 串口控制台：行首 `/` 的命令、运行时参数表、台架调试命令（见 4.4 节） |
 | `User/Comm/uart_callbacks.c` | HAL 串口回调统一分发到 HWT101 / 命令解析 |
 | `User/Navigation/map.c` | 2400 × 2400 mm 栅格（10 mm 一格）、构型空间位图（7.2 KB，`Map_CanStand` O(1)）、圆形障碍、地图版本号 |
 | `User/Navigation/astar.c` | 分步 A*：每拍只扩展 32 个节点，先分块清窗口再搜索；四张表放 `.agv_ram`，路径回溯复用堆数组 |
@@ -101,12 +102,14 @@ tests/host/                   PC 端单元测试 + 假 HAL
 | `survey_test.c` | 中国邮路覆盖全部 12 条通道 |
 | `chassis_test.c` | 定距/转向闭环、世界坐标、命令解析、文本输出、反馈丢失、超时、停止重发、DWT 回绕 |
 | `bench_test.c` | 单轮测试顺序/判定/中断、堵转保护与掉使能恢复、故障原因文本、DWT 解锁；`-DCHASSIS_USE_IMU=0` 版本验证无陀螺仪航向推算 |
-| `path_test.c` | 连续过弯全程不出现零速、偏线在 5 mm 内、直线合并与原地转向 |
+| `path_test.c` | 连续过弯全程不出现零速、偏线在 5 mm 内、直线合并与原地转向、直线跑满设定速度；偏线只量正在走的段（路线重合、原路折返、参考折线丢点） |
 | `command_path_test.c` | 运动中命令排队、分片命令、`S` 清队、错误行原子性、`DONE path` 统计只打印一次、长指令流追加 |
-| `agv_test.c` | 巡检整圈覆盖/回库/停锁/占领出发区/底盘故障/碰墙/地图失效/航向超限/总超时/BUSY 重试 |
+| `agv_test.c` | 巡检整圈覆盖/回库/停锁/占领出发区/底盘故障/碰墙/地图失效/航向超限/总超时/BUSY 重试（假底盘） |
+| `survey_loop_test.c` | 真实底盘代码 + 巡检状态机跑完整圈：两个出发区都到 `AGV_DONE`、12 条通道全覆盖、偏线和回库残差、调试台读的 `AGV` 行格式 |
 | `mode_test.c` | 三种 `AGV_MODE` 下的命令门控、`S`、接收溢出 |
+| `console_test.c` | 控制台：改参数后真实控制输出跟着变、错误输入、停车才能改的参数、行结束方式、接收溢出、绘图频率和通道、调试台依赖的输出格式；另编一份验证无陀螺仪版本 |
 | `task_test.c` | 任务码解析：规则示例、颜色编号、第二批码垛环号、各类非法码、模块字节流分行 |
-| `comp_task_test.c` | 比赛模式任务码通道：扫码模块和相机文本经 `competition.c` 进入 `comp.task`，错码不覆盖好码 |
+| `comp_task_test.c` | 比赛模式任务码通道：扫码模块和相机文本经 `competition.c` 进入 `comp.task`，错码不覆盖好码；控制台的 `/task`、`/vision`、`/obs`、`/pose` 和雷达参数；调试台读的 `COMP` 行格式 |
 | `../vision_protocol_test.py` | 上位机颜色编号和 TASK 帧字节（与 `comp_test.c` 解码的帧相同） |
 
 ---
@@ -117,7 +120,7 @@ tests/host/                   PC 端单元测试 + 假 HAL
 |---|---|
 | 0 COMMAND | 串口指令模式，底盘按 USART6 命令走（默认限速 100 mm/s） |
 | 1 SURVEY | 纯底盘跑全图巡检，READY 且等待 3 s 后自动出发（150 mm/s） |
-| 2 COMPETITION | C1 雷达障碍识别 + 视觉上位机串口通信 + 扫码模块读任务码（见第 9 节）；取放料流程待接入 |
+| 2 COMPETITION | C1 雷达障碍识别 + 视觉上位机串口通信 + 扫码模块读任务码（见第 9 节）；取放料流程待接入，目前底盘用串口命令手动开 |
 
 底盘模式（`chassis.mode`）：`VEL` 速度模式 / `MOVE` 定距 / `TURN` 转向 / `PATH` 连续航点。
 
@@ -136,9 +139,9 @@ WAIT ──READY+3s──> DOCK_OUT ──> PLAN(需要时) ──> DRIVE ──
 
 ---
 
-## 4. 串口交互（USART6，直接用串口助手）
+## 4. 串口交互（USART6）
 
-**不需要任何上位机程序。** 所有输入输出都是可读的 ASCII 文本，任何串口助手（XCOM、SSCOM、MobaXterm、PuTTY、VOFA+ 的串口文本模式等）都能用。
+所有输入输出都是可读的 ASCII 文本，任何串口助手（XCOM、SSCOM、MobaXterm、PuTTY、VOFA+ 的串口文本模式等）都能用；要界面就用调试台（4.5 节）。
 
 串口助手设置：**115200、8 数据位、无校验、1 停止位、无流控**；接收区用"文本/ASCII"显示（不要勾 HEX）；发送时勾不勾"加回车换行"都可以（没有换行时靠串口空闲中断判定一条结束）。输出全是英文 ASCII，GBK / UTF-8 都不会乱码。
 
@@ -161,7 +164,7 @@ WAIT ──READY+3s──> DOCK_OUT ──> PLAN(需要时) ──> DRIVE ──
 - **整行原子**：整行解析通过才提交，有一处错就整行不执行，回 `ERR`。
 - 运动中发新的移动命令会**排队追加**到当前路径；`S` 立即生效并丢弃该行剩余内容。
 - 指令模式移动速度 100 mm/s（`agv_config.h` 的 `CHASSIS_COMMAND_SPEED_MM_S`）。
-- 非指令模式（巡检）下只接受 `S`、`I`、`D`、`H`，其余回 `BUSY`。
+- 巡检模式下只接受 `S`、`I`、`D`、`H` 和控制台命令（4.4 节），其余回 `BUSY`。比赛模式还没有比赛流程，移动命令和 `W` 都能用；加上比赛流程后运行中必须锁掉，规则禁止遥控。
 
 ### 4.2 串口输出
 
@@ -207,6 +210,89 @@ ERR  bad command 'Q' (H for help)
 6. 组合：`F500 L500 B500 R500` 走一个方框，看 `DONE path` 的 `max_cross`、回到原点的 x/y。
 7. 出现 `FAULT` 时串口会写原因，处理后发 `S` 清除（堵转保护会自动解除，电机会重新使能）。
 
+### 4.4 串口控制台：实时改参数、看曲线
+
+行首是 `/` 的一行是控制台命令，其他行还是上面的单字母命令。三种模式都能用，不用重新烧录。
+
+| 命令 | 作用 |
+|---|---|
+| `/` 或 `/help` | 控制台帮助 |
+| `/list [前缀]` | 列出参数：当前值、范围、默认值。例：`/list heading` |
+| `/set <名字> <值>` | 检查范围后立即生效，回显旧值和新值。例：`/set heading_kp 2.5` |
+| `/reset` | 全部恢复默认值，只能在停车时用 |
+| `/plot <heading\|speed\|wheels> [hz]` | 输出绘图数据，1~100 Hz，默认 50；`/plot off` 停止 |
+
+比赛模式（`AGV_MODE=2`）另有台架调试命令：
+
+| 命令 | 作用 |
+|---|---|
+| `/task <任务码>` | 当作扫到了这个码，走同一套校验。没有扫码模块时也能测后面的流程 |
+| `/vision <模式> [颜色]` | 设置上位机视觉任务：0 关、1 二维码、2 物料、3 圆环；颜色 0 任意，1~6 同规则编号 |
+| `/obs`、`/obs clear` | 列出雷达障碍物；停车时清除（同时重建地图、通知上位机） |
+| `/pose <x> <y> <航向>` | 把车搬到某处后设定场地位姿（mm、度），需要底盘 READY |
+
+**参数**（`CHASSIS_MAX_WHEEL_RPM`、`CHASSIS_MOVE_MAX_SPEED` 是硬限制，不开放修改）：
+
+| 生效时机 | 名字 | 默认 | 范围 | 含义 |
+|---|---|---|---|---|
+| 下一拍（5 ms） | `heading_kp` | 2 | 0~20 | 航向比例增益 |
+| 下一拍 | `heading_ki` | 1 | 0~20 | 航向积分增益；设成 0 同时清掉积分 |
+| 下一拍 | `heading_i_max` | 5 | 0~60 | 积分输出上限，deg/s |
+| 下一拍 | `heading_i_zone` | 8 | 0~180 | 误差小于此值才积分，度 |
+| 下一拍 | `turn_max_speed` | 90 | 1~240 | 航向环输出限幅，deg/s |
+| 下一拍 | `distance_kp` | 1.5 | 0.1~10 | 定距 P 增益，1/s |
+| 下一拍 | `distance_tol` | 3 | 0.5~50 | 到位容差，mm |
+| 下一拍 | `heading_tol` | 0.1 | 0.01~10 | 航向到位容差，度 |
+| 下一拍 | `settle_ms` | 200 | 0~2000 | 停稳多久算完成，ms |
+| 下一拍 | `acc_linear` | 2000 | 100~5000 | 线加速度，mm/s² |
+| 下一拍 | `acc_angular` | 720 | 30~3000 | 角加速度，deg/s² |
+| 下一条路径 | `cmd_speed` | 100 | 10~400 | 串口移动命令的速度，mm/s；正在走的路径保持原限速 |
+| 只能停车改 | `wheel_dia` | 77 | 40~150 | 轮径，mm（标定里程计） |
+| 只能停车改 | `chassis_k` | 220.2 | 100~400 | 旋转半径系数，(轴距+轮距)/2，mm |
+| 只能停车改 | `path_deviation` | 5 | 0.5~50 | 拐角允许偏差，mm |
+| 下一个雷达点（比赛模式） | `lidar_x`、`lidar_y` | 0 | ±200 | 雷达安装位置，mm |
+| 下一个雷达点 | `lidar_yaw` | 0 | ±180 | 雷达安装角，度 |
+| 下一个雷达点 | `lidar_min`、`lidar_max` | 200、1800 | 50~500、500~6000 | 参与识别的距离范围，mm |
+| 下一个雷达点 | `obs_gap` | 45 | 5~200 | 同一簇相邻点最大间距，mm |
+| 下一个雷达点 | `obs_width` | 95 | 20~300 | 簇宽上限，mm |
+| 下一个雷达点 | `obs_match` | 60 | 10~300 | 跨圈关联距离，mm |
+| 下一个雷达点 | `obs_confirm` | 4 | 1~50 | 连续命中多少圈才确认 |
+
+**怎么用：**
+
+- **值只在 RAM 里，断电就没了。** H750VB 内部 Flash 只有一个 128 KB 扇区，放的就是程序，擦它存参数会把程序一起擦掉。调试台会记下改过的值，上电后提示写回；不用调试台时把 `/set` 命令存成文本贴回去。定稿后把数值写回 `chassis.h`、`agv_config.h`、`comp_config.h` 的宏。
+- **发送方式：** 一次发一整行。串口助手勾不勾“加回车换行”都行，不加时靠串口空闲判定一行结束。PuTTY 这类终端要打开本地行编辑（Terminal → Local line editing = Force on），否则每敲一个字符就算一行。
+- **控制台行里的 `s` 不算停车，** 否则 `/set heading_tol ...` 会把车停下。
+- **绘图：** 每行是 `plot:a,b,c`，开始时会回复每一列的含义。`heading` 是目标航向、航向、误差、目标角速度、下发角速度；`speed` 是目标、下发、实测的 vx 和 vy；`wheels` 是四轮目标和实测转速（LF RF LR RR）。调参时先发 `D0` 关掉状态行。115200 波特约 11 KB/s，一行约 50 字节，`/plot wheels 100` 也跟得上。这种带标签的逗号分隔文本就是 VOFA+ FireWater 模式的格式（还没用 VOFA+ 实测）。
+- **无线调试：** USART6 接一个串口无线模块，车跑起来也能用控制台，固件不用改。规则允许和笔记本通信，但运行中不能遥控，所以比赛流程加上后要在运行时锁掉 `/set`、运动命令和台架命令。
+
+### 4.5 调试台（`tools/agv_console.html`）
+
+一个网页文件，不联网、不用安装。USB 转串口接 USART6，用电脑版 Chrome 或 Edge 打开这个文件，点“连接串口”选端口。
+
+如果浏览器不让这个页面用串口（页面会提示），在 `tools` 目录起一个本地服务，再打开 `http://localhost:8000/agv_console.html`：
+
+```bash
+python -m http.server 8000
+```
+
+| 区域 | 内容 |
+|---|---|
+| 顶栏 | 连接、波特率、底盘状态、运行模式；**急停 / 清故障**（快捷键 Esc，发 `S`） |
+| 参数 | 从 `/list` 读出来，固件加参数不用改网页。滑块和数字框，超范围当场拒绝，车在动时锁住“只能停车改”的项；导出、导入 JSON |
+| 实时曲线 | 航向环、车速、轮速，10~100 Hz，窗口 5~60 s；悬停看数值，点图例隐藏通道，暂停，导出 CSV |
+| 终端 | 固件的全部文本，能发任何命令，↑↓ 翻历史；状态行和曲线数据默认隐藏 |
+| 底盘状态 | 位姿、速度、四轮转速、故障原因、上一条路径的统计 |
+| 运动 | 前后左右、转向、转回 0°、单轮测试（巡检模式下禁用） |
+| 巡检（`AGV_MODE=1`） | 巡检状态和错误原因、覆盖通道数、回库残差；场地图上画车的位置。巡检故障时底盘仍是 READY，要看这里和顶栏 |
+| 比赛（`AGV_MODE=2`） | 场地图（车、障碍物，点图设定位姿）、任务码含义表（可手动输入）、视觉模式和颜色、雷达 / 上位机 / 扫码模块的健康计数 |
+
+- 模式由固件决定：开机信息里有就用开机信息，中途连上时读完 `/list` 再推断。
+- 改过的值记在这台电脑的浏览器里。连接或固件重启后，如果固件里的值和记录不同，页面提示“全部写入”。
+- 连接时把状态行调到 5 Hz，正常断开时调回 1 Hz。
+- 数据全部来自固件文本，解析规则集中在 `parseLine`；这些格式由 `console_test`、`comp_task_test`、`survey_loop_test` 逐字固定，改固件输出时测试会提醒。
+- 网页本身没有自动测试，是接固件仿真（真实固件代码 + 假串口）手工跑的，**还没有接过真实串口和真车**。
+
 ## 6. 底盘与导航实现要点
 
 - **运动学**：轮速 = 符号矩阵 × (vx, vy, K·ω)。`Mᵀ·M = 4I`，所以正解取 `Mᵀ/4`。超限时四轮同乘一个系数，保证合成速度方向不歪。
@@ -214,7 +300,7 @@ ERR  bad command 'Q' (H for help)
 - **里程计**：每 20 ms 同时读四轮位置，四轮都更新后才用位置差分累加位移；采样时刻存在 `s_odom_sample_ms[]`，用于 PATH 模式的 40 ms 内预测。
 - **航向**：IMU 帧带接收时间戳，超过 500 ms 没新帧就判反馈失效。
 - **连续路径**：拐角用二次贝塞尔在两侧各裁 `min(2×容差, 0.25×段长)`，入弯/出弯按向心加速度限速；推进条件是 `距离 ≤ 0.15 mm` 或 `已越过且距离 < 1 mm`，因此 2 mm 间距的航点也不会被跳过，全程不会每段停车。
-- **偏线统计**：参考折线从上次匹配处附近向前取最小距离（避免重复边互相吸收），参考点满 257 个时丢已走过的点；万一当前段被挤掉，退回"当前弦长"并置截断标志。
+- **偏线统计**：每个内部点记着自己属于哪个原始航点（`s_path_vertex`），偏线只量控制器正在走的那几段原始折线，含拐角两侧，所以贝塞尔裁掉的部分也算在内。不按位置找最近段：巡检路线会重复经过同一条边，那样会匹配到后面重合的段。参考点满 257 个时丢已走过的点；万一当前段被挤掉，退回量当前弦长并置截断标志。
 - **A***：障碍只改构型空间位图（每格 10 mm），搜索窗口只清窗口内的表，每拍 32 节点，控制节拍不会被大块 memset 打断。
 - **巡检路线**：12 条通道 = 3×3 网格的 12 条边，奇度点（4 个中点）两两配最短路径补 4 条重复边，得到 16 段欧拉回路，回到出发点。
 
@@ -278,12 +364,12 @@ build/format_tools/clang_format/data/bin/clang-format.exe -i User tests/host
 
 | 区域 | 起点 | 内容 |
 |---|---|---|
-| FLASH 128 KB | `0x08000000` | 代码与常量（Debug 实测约 83%，Release 约 48%） |
-| DTCM 128 KB | `0x20000000` | `.data/.bss`、主栈、FreeRTOS 堆（15 KB）、任务栈 |
+| FLASH 128 KB | `0x08000000` | 代码与常量。比赛模式 Release 57%、Debug 96%；指令模式 Release 50%、Debug 86%；巡检模式 Release 50%。**Debug 快满了，日常用 Release** |
+| DTCM 128 KB | `0x20000000` | `.data/.bss`、主栈、FreeRTOS 堆（15 KB）、任务栈（比赛模式 72%，其他 65%） |
 | AXI SRAM 512 KB | `0x24000000` | `.agv_ram`：A* 四张表（`cost/heap/position` 2 B + `parent` 1 B，合计约 394 KB）+ 地图位图 7.2 KB（约 78%） |
 | SRAM1 256 B | `0x30000000` | `.imu_dma`：UART5 的 DMA 缓冲，链接脚本断言必须在 `0x30000000` 且 ≤ 256 B |
 
-> A* 表按 57600 格 × 7 B 计算，占满了 RAM 段的大部分，这也是 Flash 77% / RAM 78% 的来源；要省 RAM 就减 `MAP_CELL_MM` 或缩小 `MAP_WIDTH_MM/HEIGHT_MM`。
+> A* 表按 57600 格 × 7 B 计算，占满了 RAM 段的大部分，这也是 RAM 78% 的来源；要省 RAM 就减 `MAP_CELL_MM` 或缩小 `MAP_WIDTH_MM/HEIGHT_MM`。
 
 | 任务 | 优先级 | 栈 | 周期 | 说明 |
 |---|---|---|---|---|
@@ -293,7 +379,7 @@ build/format_tools/clang_format/data/bin/clang-format.exe -i User tests/host
 
 `configCHECK_FOR_STACK_OVERFLOW = 2`：溢出时 `vApplicationStackOverflowHook` 先给四轮发停止，再停机，任务名留在 `stack_overflow_task` 供调试器查看。
 
-实测栈占用（`-fstack-usage`，O0）：底盘任务最坏链约 **0.6 KB / 2 KB**（`ChassisTelemetry_Poll → PrintStatus 152 B` + `vsnprintf`，文本缓冲都是静态的），IMU 任务最坏约 0.35 KB / 1 KB（`HAL_UART_AbortReceive` 重启路径）。
+实测栈占用（`-fstack-usage`，O0）：底盘任务最坏链约 **0.6 KB / 2 KB**（`ChassisTelemetry_Poll → PrintStatus 152 B` + `vsnprintf`，文本缓冲都是静态的），IMU 任务最坏约 0.35 KB / 1 KB（`HAL_UART_AbortReceive` 重启路径）。比赛模式多一条更深的链（Release）：`Comp_Tick 216 B → VisionTick 480 B → AcceptTask 72 B → Printf` + `vsnprintf`，约 1.1 KB / 2 KB。
 
 ---
 
@@ -305,6 +391,8 @@ build/format_tools/clang_format/data/bin/clang-format.exe -i User tests/host
 - 巡检整圈是一条 256 航点上限的路径（`CHASSIS_PATH_CAPACITY`），超出会报 `AGV_ERR_PATH`；8 圈约 132 个航点，仍在范围内。
 - `S` 会丢弃本行剩余内容、"接收溢出"会丢弃到下一个结束符，这是有意的：宁可丢一行，也不执行半条路径。
 - CAN 必须是 1 Mbps，且电机 `CAN_Baud` 要逐台改；否则轮子完全不动。
+- 运动中分批发命令时，两批接缝处的拐角没有贝塞尔过渡，只靠出弯限速，理想模型下偏线约 7 mm，超过 5 mm 的拐角容差。要拐得准就写在同一行：`F300 L200`。
+- 车总是停在到位容差的边上：`distance_tol` 默认 3 mm，理想模型下 `F200` 停在 197.2 mm，巡检回库残差约 2.9 mm。要停得更准就调小它。
 
 ---
 
@@ -314,14 +402,16 @@ build/format_tools/clang_format/data/bin/clang-format.exe -i User tests/host
 
 | 环 | 位置 | 对象 | 输出 |
 |---|---|---|---|
-| **航向 PI** | `Chassis_HeadingControl()`，`chassis.c` 第 281 行 | `heading_error`（°） | `wz`（deg/s），限幅 `CHASSIS_TURN_MAX_SPEED` |
-| **定距 P** | `Chassis_AutoControl()`，`chassis.c` 第 300 行 | 剩余距离（mm） | `vx/vy`（mm/s） |
+| **航向 PI** | `chassis.c` 的 `Chassis_HeadingControl()` | `heading_error`（°） | `wz`（deg/s），限幅 `CHASSIS_TURN_MAX_SPEED` |
+| **定距 P** | `chassis.c` 的 `Chassis_AutoControl()` | 剩余距离（mm） | `vx/vy`（mm/s） |
 
 - 航向 PI 是**唯一**的 PID 型环，MOVE / TURN / PATH 三种模式共用；PATH 模式只是把 `heading_target` 按航段进度插值。
 - PATH 模式的位置**不是 PID**：方向直接指向当前航点，速度由几何前馈 + 刹车曲线算出来（`chassis_path.inc`），没有位置积分。
 - **轮速环在 ZDT_X42S 驱动器内部**（闭环步进自己的速度/位置环），固件只下发 0.1 RPM 目标，固件里没有它的 PID；要调在驱动器菜单里调。
 
-### 11.2 改 PID：只动 `User/Chassis/chassis.h` 顶部这几个宏
+### 11.2 改 PID：现场用 `/set`，定稿写回 `User/Chassis/chassis.h` 顶部这几个宏
+
+下面的宏是开机默认值，运行时用 `/set` 改（4.4 节），不用重新烧录。
 
 | 宏 | 当前值 | 作用 | 调大的效果 |
 |---|---|---|---|
@@ -350,13 +440,13 @@ build/format_tools/clang_format/data/bin/clang-format.exe -i User tests/host
 
 | 想要的效果 | 改哪里 |
 |---|---|
-| **指令模式**整体快慢（F/B/L/R 的默认速度） | `User/Config/agv_config.h` 的 `CHASSIS_COMMAND_SPEED_MM_S`（默认 100 mm/s） |
-| **巡检模式**整体快慢 | `User/Config/agv_config.h` 第 52 行 `AGV_SURVEY_SPEED_MM_S`（默认 150），也可以 `cmake -DAGV_SURVEY_SPEED_MM_S=200` 直接从命令行覆盖 |
-| **绝对上限**（任何模式都过不去） | `chassis.h` 第 24 行 `CHASSIS_MAX_WHEEL_RPM`（400 RPM，解算后四轮等比缩放）；`Chassis_SetMoveSpeedLimit` 会把目标速度钳位到 10~400（`chassis.h` 第 37 行 `CHASSIS_MOVE_MAX_SPEED`） |
-| **过弯速度**（现在 90° 弯 ≈50 mm/s） | `chassis.h` 第 21 行 `CHASSIS_ACC_LINEAR` 和第 104 行 `CHASSIS_PATH_DEVIATION_MM`；90° 弯的限速 = `sqrt(a·0.25·r)`，r 最大就是 `CHASSIS_PATH_DEVIATION_MM`，所以想更快只能加加速度或放宽容差 |
-| **起步/刹车手感** | `chassis.h` 第 21~25 行加速度：`CHASSIS_ACC_LINEAR`（前向/横向）/ `CHASSIS_ACC_ANGULAR`（角加速度） |
-| **转向角速度** | `chassis.h` 第 41 行 `CHASSIS_TURN_MAX_SPEED`（90 deg/s） |
-| **VEL 手工遥控**（调试用 `Chassis_SetVelocity`） | `chassis.h` 第 19~20 行 `CHASSIS_MAX_LINEAR` / `CHASSIS_MAX_ANGULAR` |
+| **指令模式**整体快慢（F/B/L/R 的默认速度） | 现场 `/set cmd_speed 150`；默认值是 `User/Config/agv_config.h` 的 `CHASSIS_COMMAND_SPEED_MM_S`（100 mm/s） |
+| **巡检模式**整体快慢 | `User/Config/agv_config.h` 的 `AGV_SURVEY_SPEED_MM_S`（默认 150），也可以 `cmake -DAGV_SURVEY_SPEED_MM_S=200` 直接从命令行覆盖 |
+| **绝对上限**（任何模式都过不去） | `chassis.h` 的 `CHASSIS_MAX_WHEEL_RPM`（400 RPM，解算后四轮等比缩放）；`Chassis_SetMoveSpeedLimit` 会把目标速度钳位到 10~400（`chassis.h` 的 `CHASSIS_MOVE_MAX_SPEED`） |
+| **过弯速度**（现在 90° 弯 ≈50 mm/s） | 现场 `/set acc_linear`、`/set path_deviation`；默认值是 `chassis.h` 的 `CHASSIS_ACC_LINEAR`、`CHASSIS_PATH_DEVIATION_MM`。90° 弯的限速 = `sqrt(a·0.25·r)`，r 最大就是拐角容差，所以想更快只能加加速度或放宽容差。直线不受影响，靠刹车曲线减到拐角速度 |
+| **起步/刹车手感** | 现场 `/set acc_linear`、`/set acc_angular`；默认值是 `chassis.h` 的 `CHASSIS_ACC_LINEAR`（前向和横向共用）、`CHASSIS_ACC_ANGULAR` |
+| **转向角速度** | 现场 `/set turn_max_speed`；默认值是 `chassis.h` 的 `CHASSIS_TURN_MAX_SPEED`（90 deg/s） |
+| **VEL 手工遥控**（调试用 `Chassis_SetVelocity`） | `chassis.h` 的 `CHASSIS_MAX_LINEAR` / `CHASSIS_MAX_ANGULAR` |
 
 速度在固件里的合成顺序（改任何一个都要知道它被谁盖住）：
 
@@ -369,7 +459,7 @@ s_move_speed_limit（指令 100 / 巡检 150，Chassis_SetMoveSpeedLimit 设置�
   → 逆解后整体限幅 CHASSIS_MAX_WHEEL_RPM
 ```
 
-注意：`Chassis_SetMoveSpeedLimit()` 只在 `mode == VEL` 时接受新值（`chassis.c` 第 76 行），路径执行中改不动。想运行中调速，要么把那个条件去掉、要么加一条串口命令（例如 `V150`），目前没有实现。
+注意：`Chassis_SetMoveSpeedLimit()` 只在 `mode == VEL` 时接受新值，路径执行中改不动，限速表在提交路径时就算好了。`/set cmd_speed` 从下一条路径开始生效；加速度 `acc_linear` 下一拍就生效。
 
 ### 11.4 现场调速度的顺序
 
@@ -391,6 +481,9 @@ s_move_speed_limit（指令 100 / 巡检 150，Chassis_SetMoveSpeedLimit 设置�
 | 电机安装方向写死 | 左右镜像安装的电机无法在软件里修正，只能去驱动器菜单改 | `CHASSIS_WHEEL_DIR_xx`（命令与反馈同时乘方向），配合 `W` 单轮测试 |
 | 没有陀螺仪就不能动 | 反馈检查强制要求 IMU，底盘单测时永远停在 IDLE | `CHASSIS_USE_IMU=0` 时航向由四轮里程计推算 |
 | 输出只有机器帧 | `$T/$V/$H/...` 20 Hz 刷屏，串口助手里不可读，依赖上位机 | 改为可读文本：事件行、回执、1 Hz 状态行（`D` 可调）、`H` 帮助、`I` 诊断 |
+| 拐角限速压住整段直线 | 不管设多快，通往拐角的直线都只跑拐角速度（默认约 50 mm/s）：1000 mm 直线接 90° 弯要 21.9 s | 只在拐角内部的小段全程限速，直线靠刹车曲线减速；同一段路 5.5 s，直线跑满 300 mm/s，拐角 50 mm/s |
+| 巡检第一个拐角就报 `AGV_ERR_POSE` | 偏线统计按位置找最近段，路线重复经过同一条边时会跳到后面重合的段（回库段和第一段重合），真正的下一段被排除，车一离开重合段就累计到 8 mm。原来的 `agv_test` 用假底盘，这条闭环没人跑过 | 偏线只量控制器正在走的段（`s_path_vertex`）；新增 `survey_loop_test` 用真实底盘跑完整圈：约 99 s，12 条通道全覆盖，最大偏线 2.5 mm |
+| 帮助文字被截断 | `Printf` 缓冲只有 255 字节，超长的帮助被切掉 | 整段文字走 `ChassisTelemetry_Puts` |
 
 ---
 
@@ -412,11 +505,11 @@ s_move_speed_limit（指令 100 / 巡检 150，Chassis_SetMoveSpeedLimit 设置�
 
 1. 上电 600 ms 后发 STOP，20 ms 后发 SCAN（标准扫描，约 10 Hz、0.72°）；1 s 无数据自动重启。
 2. 每个点按**当前位姿**换算到场地坐标（底盘任务 5 ms 处理一次，运动补偿误差可忽略）。
-3. 丢弃：距离 < 160 mm（车体自身）或 > 1800 mm；离围挡 < 60 mm；离已知静态结构（四个岛、暂存/粗加工区、原料台）或已登记障碍 < 40 mm。
+3. 丢弃：距离 < 200 mm（车体自身，270 mm 车身的半对角线是 191 mm）或 > 1800 mm；离围挡 < 60 mm；离已知静态结构（四个岛、暂存/粗加工区、原料台）或已登记障碍 < 40 mm。
 4. 沿扫描顺序聚类（相邻点 ≤ 45 mm），簇弦长 ≤ 95 mm 视为 Ø50 圆柱；弧上点重心沿视线外推 2r/π 得圆心。
 5. 跨圈关联（60 mm），连续 4 圈命中才确认，确认后 `Map_AddObstacle(x, y, 35)` 写入栅格地图，地图版本号 +1，A* 自动避开。
 
-雷达扫描平面必须低于 100 mm（障碍物高度）。安装位置/朝向改 `COMP_LIDAR_X_MM / Y_MM / YAW_DEG`。
+雷达扫描平面必须低于 100 mm（障碍物高度）。安装位置/朝向现场用 `/set lidar_x`、`lidar_y`、`lidar_yaw`，定稿后写回 `COMP_LIDAR_X_MM / Y_MM / YAW_DEG`。
 主机仿真测试（±15/±30 mm 测距噪声、200 圈）：圆心误差 ≤ 10 mm，岛角和围挡无误报。
 
 ### 9.3 视觉串口协议
@@ -427,6 +520,8 @@ s_move_speed_limit（指令 100 / 巡检 150，Chassis_SetMoveSpeedLimit 设置�
 - `vision.material[] / ring_*`：上位机最新结果，`*_ms` 为收到时刻，用前检查新鲜度。
 - `Comp_SetVisionMode(VISION_MATERIAL, COLOR_RED)` 等：切换上位机识别任务。
 - `comp.task / comp.task_valid`：任务码，见 9.5。
+
+台架调试不用写代码：控制台的 `/vision`、`/task`、`/obs`、`/pose` 和雷达参数见 4.4 节。
 
 ### 9.4 串口助手输出（USART6，1 Hz）
 

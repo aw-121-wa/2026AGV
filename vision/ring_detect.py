@@ -1,9 +1,11 @@
 """圆环（放置靶标）检测。
 
-靶标是若干同心的实线/虚线圆环，最外圈直径 = 物料底径 + 3mm。
+靶标是若干同心的实线/虚线圆环，最内圈（1 环）外径 = 物料最大径 + 3mm。
 虚线圆用轮廓法会断开，所以这里用"灰度暗线 → 边缘 → HoughCircles"，
 再把圆心相近的所有圆聚成一组，组内圆越多越可信，取组内圆心中位数作为靶心。
 """
+import math
+
 import cv2
 import numpy as np
 
@@ -57,9 +59,8 @@ def detect(frame_bgr, min_r=15, max_r=200):
 def offset_to_target(ring):
     """圆环中心相对目标落点的偏移（mm，图像 x 向右 / y 向下）以及是否已对准。"""
     cx, cy, _, _ = ring
-    dx_px, dy_px = cx - C.TARGET_PX[0], cy - C.TARGET_PX[1]
-    aligned = abs(dx_px) <= C.ALIGN_TOL_PX and abs(dy_px) <= C.ALIGN_TOL_PX
-    return dx_px * C.MM_PER_PX, dy_px * C.MM_PER_PX, aligned
+    dx, dy = (cx - C.TARGET_PX[0]) * C.MM_PER_PX, (cy - C.TARGET_PX[1]) * C.MM_PER_PX
+    return dx, dy, math.hypot(dx, dy) <= C.ALIGN_TOL_MM
 
 
 def draw(frame, ring):

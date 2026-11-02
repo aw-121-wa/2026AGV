@@ -21,14 +21,27 @@ void ChassisTelemetry_Poll(void);
 /* 追加一行（或多行）文本，printf 格式；只能在底盘任务里调用。 */
 void ChassisTelemetry_Printf(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
+/* 追加一段固定文本，不走 Printf 的单次长度上限；只能在底盘任务里调用。 */
+void ChassisTelemetry_Puts(const char *text);
+
 /* 周期状态行频率：0 = 关闭，1..10 Hz。 */
 void ChassisTelemetry_SetRate(unsigned hz);
+
+/* 把 value 格式化成 decimals 位小数（newlib-nano 的 printf 没有浮点），一次 Printf 最多用 24 个。 */
+const char *ChassisTelemetry_Num(float value, unsigned decimals);
+
+/* 绘图数据流：每行 plot:a,b,c，给串口绘图工具用。hz 为 1..100。 */
+typedef enum
+{
+    TELEMETRY_PLOT_OFF = 0,
+    TELEMETRY_PLOT_HEADING, // 目标航向, 航向, 误差, 目标角速度, 实际下发角速度
+    TELEMETRY_PLOT_SPEED,   // 目标 vx, vy, 下发 vx, vy, 实测 vx, vy
+    TELEMETRY_PLOT_WHEELS,  // 四轮目标转速 LF RF LR RR, 四轮实测转速 LF RF LR RR
+} telemetry_plot;
+void ChassisTelemetry_SetPlot(telemetry_plot group, unsigned hz);
 
 /* 立即打印帮助 / 详细诊断信息。 */
 void ChassisTelemetry_Help(void);
 void ChassisTelemetry_Info(void);
-
-/* 因发送缓冲区满而丢弃的字节数。 */
-unsigned long ChassisTelemetry_Dropped(void);
 
 #endif

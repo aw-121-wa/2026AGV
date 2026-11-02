@@ -16,17 +16,17 @@ int main(void)
     assert(!Map_WorldToGrid(2400, 10, &r, &c));
     assert(!Map_WorldToGrid(0, 0, 0, &c));
     assert(Map_WorldToGrid(125, 237, &r, &c) && r == 23 && c == 12);
-    assert(Map_CanPose(2250, 2250, 0));
-    assert(Map_CanPose(2265, 2250, 0)); /* 270/2 = 135 */
-    assert(!Map_CanPose(2266, 2250, 0));
-    assert(Map_CanPose(2250, 2250, 10));
-    assert(!Map_CanPose(2256, 2250, 10));
+    assert(Map_CanPoseHeading(2250, 2250, 0, 0));
+    assert(Map_CanPoseHeading(2265, 2250, 0, 0)); /* 270/2 = 135 */
+    assert(!Map_CanPoseHeading(2266, 2250, 0, 0));
+    assert(Map_CanPoseHeading(2250, 2250, 0, 10));
+    assert(!Map_CanPoseHeading(2256, 2250, 0, 10));
     assert(Map_CanSegment((MapPoint){2250, 2250}, (MapPoint){2250, 2055}, 0));
     assert(Map_CanSegment((MapPoint){2250, 2055}, (MapPoint){2055, 2055}, 0));
     assert(Map_CanSegment((MapPoint){2250, 150}, (MapPoint){2250, 355}, 0));
     assert(!Map_CanSegment((MapPoint){355, 355}, (MapPoint){2055, 2055}, 0));
     assert(Map_AddObstacle(1200, 1200, 25));
-    assert(!Map_CanPose(1200, 1200, 0));
+    assert(!Map_CanPoseHeading(1200, 1200, 0, 0));
     assert(!Map_CanSegment((MapPoint){355, 1205}, (MapPoint){2055, 1205}, 10));
     Map_Init();
     /* 270 mm body fits a small angle, but not 10 degrees in the corner. */

@@ -19,7 +19,17 @@ typedef struct
     unsigned n;
 } Cluster;
 
+#define LIDAR_TUNE_DEFAULTS                                                                        \
+    {                                                                                              \
+        .lidar_x = COMP_LIDAR_X_MM, .lidar_y = COMP_LIDAR_Y_MM, .lidar_yaw = COMP_LIDAR_YAW_DEG,   \
+        .lidar_min = COMP_LIDAR_MIN_MM, .lidar_max = COMP_LIDAR_MAX_MM,                            \
+        .obs_gap = COMP_OBS_GAP_MM, .obs_width = COMP_OBS_MAX_WIDTH_MM,                            \
+        .obs_match = COMP_OBS_MATCH_MM, .obs_confirm = (float)COMP_OBS_CONFIRM,                    \
+    }
+
 LidarObsStats lidar_obs;
+LidarTuning lidar_tune = LIDAR_TUNE_DEFAULTS;
+const LidarTuning lidar_tune_default = LIDAR_TUNE_DEFAULTS;
 static Track tracks[COMP_OBS_TRACKS];
 static Cluster cl;
 
@@ -53,7 +63,7 @@ static uint8_t Interesting(float x, float y)
 static void Track_Update(float x, float y)
 {
     Track *best = 0;
-    float best_d = COMP_OBS_MATCH_MM;
+    float best_d = lidar_tune.obs_match;
     for (unsigned i = 0; i < COMP_OBS_TRACKS; ++i)
     {
         if (!tracks[i].used)
@@ -95,7 +105,7 @@ static void Track_Update(float x, float y)
         ++best->hits;
         best->last_scan = lidar_obs.scans;
     }
-    if (best->hits >= COMP_OBS_CONFIRM)
+    if (best->hits >= lidar_tune.obs_confirm)
     {
         best->confirmed = 1;
         ++lidar_obs.confirmed;
@@ -111,7 +121,7 @@ static void Cluster_Close(void)
     {
         ++lidar_obs.clusters;
         float width = hypotf(cl.lx - cl.fx, cl.ly - cl.fy);
-        if (width > COMP_OBS_MAX_WIDTH_MM)
+        if (width > lidar_tune.obs_width)
             ++lidar_obs.rejected_width;
         else
         {
@@ -145,15 +155,15 @@ void LidarObs_Feed(const RPLidarSample *s, const LidarPose *pose)
         Cluster_Close();
         EndScan();
     }
-    if (s->dist_mm < COMP_LIDAR_MIN_MM || s->dist_mm > COMP_LIDAR_MAX_MM)
+    if (s->dist_mm < lidar_tune.lidar_min || s->dist_mm > lidar_tune.lidar_max)
     {
         Cluster_Close();
         return;
     }
     /* 雷达系（x 前，y 左）：雷达角度顺时针为正，取负变成逆时针。 */
-    float a = (-s->angle_deg + COMP_LIDAR_YAW_DEG) * MATH_DEG_TO_RAD;
-    float bx = COMP_LIDAR_X_MM + s->dist_mm * cosf(a);
-    float by = COMP_LIDAR_Y_MM + s->dist_mm * sinf(a);
+    float a = (-s->angle_deg + lidar_tune.lidar_yaw) * MATH_DEG_TO_RAD;
+    float bx = lidar_tune.lidar_x + s->dist_mm * cosf(a);
+    float by = lidar_tune.lidar_y + s->dist_mm * sinf(a);
     float h = pose->heading_deg * MATH_DEG_TO_RAD, ch = cosf(h), sh = sinf(h);
     float x = pose->x + ch * bx - sh * by, y = pose->y + sh * bx + ch * by;
     if (!Interesting(x, y))
@@ -162,15 +172,15 @@ void LidarObs_Feed(const RPLidarSample *s, const LidarPose *pose)
         return;
     }
     ++lidar_obs.used;
-    if (cl.n && hypotf(x - cl.lx, y - cl.ly) > COMP_OBS_GAP_MM)
+    if (cl.n && hypotf(x - cl.lx, y - cl.ly) > lidar_tune.obs_gap)
         Cluster_Close();
     if (!cl.n)
     {
         cl.fx = x;
         cl.fy = y;
         cl.sx = cl.sy = 0.0f;
-        cl.ox = pose->x + ch * COMP_LIDAR_X_MM - sh * COMP_LIDAR_Y_MM;
-        cl.oy = pose->y + sh * COMP_LIDAR_X_MM + ch * COMP_LIDAR_Y_MM;
+        cl.ox = pose->x + ch * lidar_tune.lidar_x - sh * lidar_tune.lidar_y;
+        cl.oy = pose->y + sh * lidar_tune.lidar_x + ch * lidar_tune.lidar_y;
     }
     cl.lx = x;
     cl.ly = y;

@@ -1,6 +1,7 @@
 #ifndef __CHASSIS_H
 #define __CHASSIS_H
 
+#include "agv_config.h"
 #include "fdcan.h"
 #include "zdt_x42s.h"
 
@@ -18,10 +19,8 @@
 /* 输入限幅与斜坡 */
 #define CHASSIS_MAX_LINEAR    1200.0f // mm/s
 #define CHASSIS_MAX_ANGULAR   240.0f  // deg/s
-#define CHASSIS_ACC_LINEAR    2000.0f // mm/s^2
-#define CHASSIS_ACC_FWD       CHASSIS_ACC_LINEAR
-#define CHASSIS_ACC_LAT       CHASSIS_ACC_LINEAR // 实测后独立标定，暂不猜测横向摩擦系数
-#define CHASSIS_MAX_WHEEL_RPM 400U   // 底盘轮速上限，独立于驱动器协议极限
+#define CHASSIS_ACC_LINEAR    2000.0f // mm/s^2，前向和横向共用，暂不猜测横向摩擦系数
+#define CHASSIS_MAX_WHEEL_RPM 400U    // 底盘轮速上限，独立于驱动器协议极限
 #define CHASSIS_ACC_ANGULAR   720.0f // deg/s^2
 
 /* 驱动器下发 */
@@ -165,6 +164,34 @@ extern chassis_t chassis;
 
 #define CHASSIS_PATH_CAPACITY     256U
 #define CHASSIS_PATH_DEVIATION_MM 5.0f
+
+/* 运行时可调的参数，字段名就是串口控制台里的参数名（console.c）。上面的宏是开机默认值，
+   定稿的值写回宏里。只在底盘任务里读写（控制台也在底盘任务里运行），不需要加锁。 */
+typedef struct
+{
+    float heading_kp, heading_ki, heading_i_max, heading_i_zone;
+    float turn_max_speed;
+    float distance_kp, distance_tol, heading_tol, settle_ms;
+    float acc_linear, acc_angular;
+    float cmd_speed;
+    float wheel_dia, chassis_k, path_deviation;
+} chassis_tuning;
+
+#define CHASSIS_TUNE_DEFAULTS                                                                      \
+    {                                                                                              \
+        .heading_kp = CHASSIS_HEADING_KP, .heading_ki = CHASSIS_HEADING_KI,                        \
+        .heading_i_max = CHASSIS_HEADING_I_MAX, .heading_i_zone = CHASSIS_HEADING_I_ZONE,          \
+        .turn_max_speed = CHASSIS_TURN_MAX_SPEED, .distance_kp = CHASSIS_DISTANCE_KP,              \
+        .distance_tol = CHASSIS_DISTANCE_TOL_MM, .heading_tol = CHASSIS_HEADING_TOL_DEG,           \
+        .settle_ms = CHASSIS_SETTLE_US / 1000.0f, .acc_linear = CHASSIS_ACC_LINEAR,                \
+        .acc_angular = CHASSIS_ACC_ANGULAR, .cmd_speed = CHASSIS_COMMAND_SPEED_MM_S,               \
+        .wheel_dia = CHASSIS_WHEEL_DIA_MM, .chassis_k = CHASSIS_K_MM,                              \
+        .path_deviation = CHASSIS_PATH_DEVIATION_MM,                                               \
+    }
+
+extern chassis_tuning chassis_tune;
+extern const chassis_tuning chassis_tune_default;
+
 typedef struct
 {
     float x, y, heading;
@@ -203,9 +230,6 @@ HAL_StatusTypeDef Chassis_MoveDistance(float forward_mm, float left_mm);
 HAL_StatusTypeDef Chassis_MoveDistanceHold(float forward_mm, float left_mm, float heading_deg);
 // 空闲时设置下一次移动限速，超出 10~400 mm/s 会钳位到边界；运行中保持本次限速和超时一致。
 void Chassis_SetMoveSpeedLimit(float mm_per_second);
-// 单槽移动请求，可在中断里调用；已有待处理请求时保留旧请求。
-// 消费时若正在运动则丢弃；需要获取 BUSY/ERROR 的任务应使用 MoveDistance。
-void Chassis_MoveRequest(float forward_mm, float left_mm);
 
 // 单轮方向测试：mask bit0..3 = LF/RF/LR/RR；READY 且空闲才接受。轮子要离地！
 HAL_StatusTypeDef Chassis_WheelTest(uint8_t mask);

@@ -111,14 +111,6 @@ uint8_t Map_IsFree(uint16_t row, uint16_t col)
                           (float)(col + 1U) * MAP_CELL_MM, (float)(row + 1U) * MAP_CELL_MM});
 }
 
-/* 用车体外接矩形判断该位置放不放得下车（不考虑朝向）。 */
-uint8_t Map_CanPose(float x, float y, float margin)
-{
-    if (!initialized || !isfinite(x) || !isfinite(y) || !isfinite(margin) || margin < 0)
-        return 0;
-    return BoxFree(RobotBox(x, y, margin));
-}
-
 /* 查表判断栅格中心能否容纳车身和默认余量，O(1)。 */
 uint8_t Map_CanStand(uint16_t row, uint16_t col)
 {

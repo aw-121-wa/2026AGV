@@ -23,6 +23,16 @@ typedef struct
 
 extern LidarObsStats lidar_obs;
 
+/* 运行时可调的参数，字段名就是串口控制台里的参数名（console.c），默认值见 comp_config.h。 */
+typedef struct
+{
+    float lidar_x, lidar_y, lidar_yaw, lidar_min, lidar_max;
+    float obs_gap, obs_width, obs_match, obs_confirm;
+} LidarTuning;
+
+extern LidarTuning lidar_tune;
+extern const LidarTuning lidar_tune_default;
+
 void LidarObs_Init(void);
 
 /* 喂一个雷达采样；pose 为采样时刻的车体位姿。 */
