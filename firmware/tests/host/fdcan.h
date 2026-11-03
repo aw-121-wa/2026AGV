@@ -15,6 +15,11 @@ typedef struct
     uint32_t BusOff;
 } FDCAN_ProtocolStatusTypeDef;
 HAL_StatusTypeDef HAL_FDCAN_GetProtocolStatus(FDCAN_HandleTypeDef *, FDCAN_ProtocolStatusTypeDef *);
+typedef struct
+{
+    uint32_t TxErrorCnt, RxErrorCnt, RxErrorPassive, ErrorLogging;
+} FDCAN_ErrorCountersTypeDef;
+HAL_StatusTypeDef HAL_FDCAN_GetErrorCounters(const FDCAN_HandleTypeDef *, FDCAN_ErrorCountersTypeDef *);
 #define FDCAN_EXTENDED_ID             1U
 #define FDCAN_STANDARD_ID             0U
 #define FDCAN_DATA_FRAME              0U
@@ -25,6 +30,7 @@ HAL_StatusTypeDef HAL_FDCAN_GetProtocolStatus(FDCAN_HandleTypeDef *, FDCAN_Proto
 #define FDCAN_ACCEPT_IN_RX_FIFO0      0U
 #define FDCAN_REJECT_REMOTE           1U
 #define FDCAN_IT_RX_FIFO0_NEW_MESSAGE 1U
+#define FDCAN_IT_RX_FIFO0_MESSAGE_LOST 8U
 #define FDCAN_RX_FIFO0                0U
 #define FDCAN_DLC_BYTES_0             0U
 #define FDCAN_DLC_BYTES_1             1U

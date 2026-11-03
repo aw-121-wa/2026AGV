@@ -742,7 +742,7 @@ static void TestHelpTexts(void)
     Line("H");
     /* 帮助的最后几行也要完整出来，不能被单次 Printf 的长度上限截断。 */
     assert(strstr(Output(), "H or ?"));
-    assert(strstr(Output(), "Move speed 100 mm/s"));
+    assert(strstr(Output(), "Move speed 400 mm/s"));
     assert(strstr(Output(), "/help"));
 
     static const char *const console_help[] = {"/help", "/"};

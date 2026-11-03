@@ -2,6 +2,7 @@
 #include <string.h>
 
 #define ZDT_RX_SIZE     32U // 接收环形缓冲深度，中断写、任务读
+#define ZDT_TX_STAGE    16U // 一拍最多攒的帧数，和 CubeMX 里的 TX FIFO 一样深
 #define ZDT_FRAME_SIZE  8U  // 经典 CAN 单帧最大字节数
 #define ZDT_PACKET_DATA 7U  // 每包 = 功能码 + 至多 7 字节命令数据
 #define ZDT_MAX_ARGS    14U // 最长命令（位置模式）的参数字节数
@@ -48,6 +49,10 @@ static zdt_frame rx_buf[ZDT_RX_SIZE];
 static volatile uint16_t rx_head; // 中断写入位置
 static volatile uint16_t rx_tail; // 任务读取位置
 static volatile uint32_t rx_dropped;
+static volatile uint32_t rx_lost;
+static zdt_frame tx_stage[ZDT_TX_STAGE]; // 这一拍要发的帧，ZDT_Flush 分好组才交给硬件
+static uint8_t tx_staged;
+static uint32_t bus_errors;
 static uint32_t bus_off_count;
 static uint32_t bus_off_last_ms;
 
@@ -56,7 +61,7 @@ static const uint32_t zdt_dlc[ZDT_FRAME_SIZE + 1U] = {
     FDCAN_DLC_BYTES_5, FDCAN_DLC_BYTES_6, FDCAN_DLC_BYTES_7, FDCAN_DLC_BYTES_8,
 };
 
-/* 初始化 FDCAN：全部帧进 FIFO0、启动总线、只开新报文中断；单实例。 */
+/* 初始化 FDCAN：全部帧进 FIFO0、启动总线、开新报文和 FIFO 丢帧中断；单实例。 */
 HAL_StatusTypeDef ZDT_Init(FDCAN_HandleTypeDef *hfdcan)
 {
     if (hfdcan == NULL)
@@ -65,7 +70,9 @@ HAL_StatusTypeDef ZDT_Init(FDCAN_HandleTypeDef *hfdcan)
         return HAL_BUSY;
 
     rx_head = rx_tail = 0U;
-    rx_dropped = 0U;
+    rx_dropped = rx_lost = 0U;
+    tx_staged = 0U;
+    bus_errors = 0U;
     bus_off_count = 0U;
     bus_off_last_ms = 0U;
     motor_count = 0U;
@@ -77,7 +84,8 @@ HAL_StatusTypeDef ZDT_Init(FDCAN_HandleTypeDef *hfdcan)
     // CubeMX 不会生成 HAL_FDCAN_Start()，必须在驱动里启动总线。
     if (HAL_FDCAN_Start(hfdcan) != HAL_OK)
         return HAL_ERROR;
-    if (HAL_FDCAN_ActivateNotification(hfdcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0U) != HAL_OK)
+    if (HAL_FDCAN_ActivateNotification(
+            hfdcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE | FDCAN_IT_RX_FIFO0_MESSAGE_LOST, 0U) != HAL_OK)
     {
         (void)HAL_FDCAN_Stop(hfdcan);
         return HAL_ERROR;
@@ -107,7 +115,12 @@ zdt_motor *ZDT_AddMotor(uint8_t address)
 
 uint32_t ZDT_TxFreeLevel(void)
 {
-    return zdt_can ? HAL_FDCAN_GetTxFifoFreeLevel(zdt_can) : 0U;
+    if (zdt_can == NULL)
+        return 0U;
+    uint32_t free = HAL_FDCAN_GetTxFifoFreeLevel(zdt_can);
+    if (free > ZDT_TX_STAGE)
+        free = ZDT_TX_STAGE;
+    return free > tx_staged ? free - tx_staged : 0U;
 }
 
 uint32_t ZDT_RxDropped(void)
@@ -120,7 +133,18 @@ uint32_t ZDT_BusOffCount(void)
     return bus_off_count;
 }
 
-/* 总线关闭（Bus-Off）后 FDCAN 硬件会自己置 CCCR.INIT 并一直停在初始化态，
+uint32_t ZDT_RxLost(void)
+{
+    return rx_lost;
+}
+
+uint32_t ZDT_BusErrors(void)
+{
+    return bus_errors;
+}
+
+/* 每拍把 FDCAN 的错误计数（ECR.CEL，读一次清零）累加起来。
+   总线关闭（Bus-Off）后 FDCAN 硬件会自己置 CCCR.INIT 并一直停在初始化态，
    不清 INIT 就永远不再收发：TX FIFO 堆满、所有电机命令都发不出去，只能断电重启。
    这里每 100 ms 最多检查/恢复一次：Stop 再 Start 清掉 INIT，硬件随后完成
    128×11 个隐性位的标准恢复序列。 */
@@ -128,6 +152,9 @@ void ZDT_Service(void)
 {
     if (zdt_can == NULL)
         return;
+    FDCAN_ErrorCountersTypeDef counters;
+    if (HAL_FDCAN_GetErrorCounters(zdt_can, &counters) == HAL_OK)
+        bus_errors += counters.ErrorLogging;
     uint32_t now = HAL_GetTick();
     if (now - bus_off_last_ms < 100U)
         return;
@@ -141,7 +168,8 @@ void ZDT_Service(void)
 }
 
 /* 手册 4.2：扩展帧 ID = (地址 << 8) | 包序号；每包首字节都是功能码，后跟至多 7 字节
-   命令数据，校验码只在最后一包。先确认 FIFO 放得下全部分包，避免只发出半条命令。 */
+   命令数据，校验码只在最后一包。先确认放得下全部分包，避免只发出半条命令；帧先攒着，拍末
+   ZDT_Flush 才交给硬件。 */
 static HAL_StatusTypeDef ZDT_SendCommand(uint8_t address, uint8_t code, const uint8_t *args,
                                          uint8_t args_length)
 {
@@ -153,7 +181,7 @@ static HAL_StatusTypeDef ZDT_SendCommand(uint8_t address, uint8_t code, const ui
     body[args_length] = ZDT_CHECKSUM;
     uint8_t length = (uint8_t)(args_length + 1U);
     uint8_t packets = (uint8_t)((length + ZDT_PACKET_DATA - 1U) / ZDT_PACKET_DATA);
-    if (HAL_FDCAN_GetTxFifoFreeLevel(zdt_can) < packets)
+    if (ZDT_TxFreeLevel() < packets)
         return HAL_ERROR; // 交给调用者下个周期重试，不在这里死等
 
     for (uint8_t packet = 0, offset = 0; packet < packets; ++packet)
@@ -161,25 +189,62 @@ static HAL_StatusTypeDef ZDT_SendCommand(uint8_t address, uint8_t code, const ui
         uint8_t chunk = (uint8_t)(length - offset);
         if (chunk > ZDT_PACKET_DATA)
             chunk = ZDT_PACKET_DATA;
-        uint8_t data[ZDT_FRAME_SIZE];
-        data[0] = code;
-        memcpy(&data[1], &body[offset], chunk);
+        zdt_frame *frame = &tx_stage[tx_staged++];
+        frame->id = ((uint32_t)address << 8) | packet;
+        frame->length = (uint8_t)(chunk + 1U);
+        frame->data[0] = code;
+        memcpy(&frame->data[1], &body[offset], chunk);
+        offset = (uint8_t)(offset + chunk);
+    }
+    return HAL_OK;
+}
 
+/* 把这一拍攒下的帧交给 TX FIFO（CubeMX 配的是 FIFO 模式，按交进去的顺序上总线）：地址大的电机先发，
+   同一台的帧挨着、保持先后，广播最后。ZDT 的命令和应答用同一个 CAN ID，驱动器的应答还没发出去时
+   又来一条发给它的帧，两边同时发同一个 ID 就撞成错误帧，应答常常就丢了。地址大的应答仲裁输给所有
+   地址小的帧，只能等主控这一串发完：原来四条读取在前、四条速度命令在后，后轮的应答正好撞上发给
+   自己的速度命令（台架上后轮回复少了 2%~4%，7 分钟总线错误两万多次，前轮一条没丢）。分好组以后，
+   发给一台驱动器的帧都在它开始应答之前发完，它的应答后面只剩地址更小的帧，只会干等、不会撞。
+   一组最多两帧：三帧时它对第一帧的应答在第二帧发的时候就准备好了，正好撞上第三帧，所以调用方一拍
+   给一台驱动器最多攒两帧（ZDT_Staged）。 */
+void ZDT_Flush(void)
+{
+    for (uint8_t i = 1; i < tx_staged; ++i)
+    {
+        zdt_frame frame = tx_stage[i];
+        uint8_t j = i;
+        while (j > 0U && (tx_stage[j - 1U].id >> 8) < (frame.id >> 8))
+        {
+            tx_stage[j] = tx_stage[j - 1U];
+            --j;
+        }
+        tx_stage[j] = frame;
+    }
+    for (uint8_t i = 0; i < tx_staged; ++i)
+    {
         FDCAN_TxHeaderTypeDef header = {0};
-        header.Identifier = ((uint32_t)address << 8) | packet;
+        header.Identifier = tx_stage[i].id;
         header.IdType = FDCAN_EXTENDED_ID;
         header.TxFrameType = FDCAN_DATA_FRAME;
-        header.DataLength = zdt_dlc[chunk + 1U];
+        header.DataLength = zdt_dlc[tx_stage[i].length];
         header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
         header.BitRateSwitch = FDCAN_BRS_OFF;
         header.FDFormat = FDCAN_CLASSIC_CAN;
         header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
         header.MessageMarker = 0;
-        if (HAL_FDCAN_AddMessageToTxFifoQ(zdt_can, &header, data) != HAL_OK)
-            return HAL_ERROR;
-        offset = (uint8_t)(offset + chunk);
+        // 攒的时候按硬件空位算过，这一拍里 FIFO 只会越来越空，放得下
+        (void)HAL_FDCAN_AddMessageToTxFifoQ(zdt_can, &header, tx_stage[i].data);
     }
-    return HAL_OK;
+    tx_staged = 0U;
+}
+
+uint8_t ZDT_Staged(const zdt_motor *motor)
+{
+    uint8_t n = 0U;
+    for (uint8_t i = 0; motor != NULL && i < tx_staged; ++i)
+        if ((uint8_t)(tx_stage[i].id >> 8) == motor->address)
+            ++n;
+    return n;
 }
 
 static HAL_StatusTypeDef ZDT_SendMotorCommand(zdt_motor *motor, uint8_t code, const uint8_t *args,
@@ -189,7 +254,10 @@ static HAL_StatusTypeDef ZDT_SendMotorCommand(zdt_motor *motor, uint8_t code, co
         return HAL_ERROR;
     HAL_StatusTypeDef status = ZDT_SendCommand(motor->address, code, args, args_length);
     if (status == HAL_OK)
+    {
         motor->ack_pending = 1U;
+        ++motor->commands;
+    }
     return status;
 }
 
@@ -268,10 +336,14 @@ HAL_StatusTypeDef ZDT_RequestStatus(zdt_motor *motor)
     return motor ? ZDT_SendCommand(motor->address, ZDT_CODE_STATUS, NULL, 0U) : HAL_ERROR;
 }
 
-/* CAN 接收中断：抽空 FIFO0，只保留扩展数据帧，写入软件环形队列。 */
+/* CAN 接收中断：记下硬件 FIFO 丢帧；抽空 FIFO0，只保留扩展数据帧，写入软件环形队列。 */
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
-    if (zdt_can == NULL || hfdcan != zdt_can || (RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U)
+    if (zdt_can == NULL || hfdcan != zdt_can)
+        return;
+    if (RxFifo0ITs & FDCAN_IT_RX_FIFO0_MESSAGE_LOST)
+        ++rx_lost;
+    if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U)
         return;
 
     FDCAN_RxHeaderTypeDef header;
@@ -354,6 +426,7 @@ static void ZDT_HandleFrame(const zdt_frame *frame)
         motor->speed_rpm = (float)ZDT_BigEndian(&data[2], 2U) * (data[1] ? -0.1f : 0.1f);
         motor->speed_ms = now;
         motor->speed_valid = 1U;
+        ++motor->speed_seq;
         return;
     case ZDT_CODE_STATUS: // 3A <状态标志> 6B
         if (length != 3U)
@@ -364,6 +437,7 @@ static void ZDT_HandleFrame(const zdt_frame *frame)
         motor->protected_flag = (data[1] & ZDT_STATUS_PROTECT) ? 1U : 0U;
         motor->status_ms = now;
         motor->status_valid = 1U;
+        ++motor->status_seq;
         return;
     case ZDT_CODE_ERROR: // 00 EE 6B，命令格式错误
         break;
@@ -380,6 +454,8 @@ static void ZDT_HandleFrame(const zdt_frame *frame)
         }
         motor->ack_code = data[1];
         motor->ack_pending = 0U;
+        if (code != ZDT_CODE_SYNC) // 广播同步由地址 1 应答，不是发给它的命令
+            ++motor->acks;
         if (code == ZDT_CODE_ENABLE)
             motor->enabled = data[1] == ZDT_ACK_OK;
         return;

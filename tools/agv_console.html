@@ -519,15 +519,15 @@ body[data-mode=SURVEY] #map { cursor: default; }
           <div class="inline">
             <label class="check">X <input id="pickX" type="number" value="300" min="0" max="2399"></label>
             <label class="check">Y <input id="pickY" type="number" value="300" min="0" max="2399"></label>
-            <label class="check">航向 <input id="pickH" type="number" value="0" min="-180" max="180"></label>
+            <label class="check">航向 <input id="pickH" type="number" value="90" min="-180" max="180"></label>
           </div>
           <div class="inline" style="margin-top:6px">
             <button class="needs-link primary run-lock" id="routePlan">规划到这里</button>
             <button class="needs-link run-lock" id="poseSet">设为当前位姿</button>
           </div>
           <div class="inline" style="margin-top:6px">
-            <button data-zone="2250">选启停区 1</button>
-            <button data-zone="150">选启停区 2</button>
+            <button data-zone="2250" data-heading="90">选启停区 1</button>
+            <button data-zone="150" data-heading="0">选启停区 2</button>
           </div>
         </div>
       </section>
@@ -886,13 +886,13 @@ function updateLocks() {
   updateParamEnabled();
 }
 
-const RUN_STATES = { idle: '等启动', scan: '停车扫描', plan: '规划路线', move: '开往下一处', wait: '等任务码', done: '开局完成', stopped: '已停止', failed: '失败' };
-const RUN_WHY = { route: '去不了二维码板前', task: '读不到任务码', chassis: '底盘故障' };
+const RUN_STATES = { idle: '等启动', scan: '停车扫描', plan: '规划路线', move: '开往下一处', turn: '板前转向', wait: '沿板找码', done: '开局完成', stopped: '已停止', failed: '失败' };
+const RUN_WHY = { route: '去不了二维码板前', task: '读不到任务码', chassis: '底盘故障', turn: '没转到位', blind: '这段雷达被车身挡着看不清' };
 
 function onRun(state, why) {
   /* 新的一次流程开始：上一次的结果作废。中途连上时 /obs 紧跟着会把障碍物补回来。 */
   if (state === 'scan' && !app.running) Object.assign(app, { obstacles: [], scanPoints: [], trace: [] });
-  app.running = ['scan', 'plan', 'move', 'wait'].includes(state);
+  app.running = ['scan', 'plan', 'move', 'turn', 'wait'].includes(state);
   setPill('runPill', '流程 ' + (state ? RUN_STATES[state] || state : '--') + (why ? '：' + (RUN_WHY[why] || why) : ''),
     state === 'failed' ? 'bad' : state === 'stopped' ? 'warn' : app.running || state === 'done' ? 'ok' : '');
   if (state === 'scan') {
@@ -912,7 +912,7 @@ const GROUPS = [
   ['distance', '定距与到位（下一拍生效）'],
   ['motion', '速度与加速度'],
   ['calib', '机械标定（只能停车改）'],
-  ['lidar', '雷达（下一个雷达点生效）'],
+  ['lidar', '雷达（下一个雷达点生效，舵机角度马上转过去）'],
   ['other', '其他'],
 ];
 const PARAM_INFO = {
@@ -934,12 +934,14 @@ const PARAM_INFO = {
   lidar_x: ['雷达 X', 'lidar', 'mm', '安装位置，车头方向为正'],
   lidar_y: ['雷达 Y', 'lidar', 'mm', '安装位置，车左方向为正'],
   lidar_yaw: ['雷达安装角', 'lidar', '°', '雷达 0° 相对车头，逆时针为正'],
-  lidar_min: ['最近距离', 'lidar', 'mm', '更近的点算车体自身'],
+  lidar_min: ['最近距离', 'lidar', 'mm', '更近的点算噪声；打到车身的点另外去掉'],
   lidar_max: ['最远距离', 'lidar', 'mm', '更远的点不参与识别'],
   obs_gap: ['簇内点距', 'lidar', 'mm', '同一簇相邻点最大间距'],
   obs_width: ['簇宽上限', 'lidar', 'mm', '更宽的不算障碍物'],
   obs_match: ['关联距离', 'lidar', 'mm', '跨圈算同一个目标的距离'],
   obs_confirm: ['确认圈数', 'lidar', '圈', '连续命中多少圈才确认'],
+  servo_scan: ['舵机伸出', 'lidar', '°', '扫描时舵机转到这里，把雷达伸出去；/scan 能直接看'],
+  servo_stow: ['舵机收回', 'lidar', '°', '平时和开动时舵机在这里，雷达收在车身里；改了马上转过去'],
 };
 
 let listTimer = 0;
@@ -1899,7 +1901,7 @@ $('wheelTest').addEventListener('click', () => {
 
 $('scanBtn').addEventListener('click', () => { app.scanPoints = []; send('/scan'); });
 $('startBtn').addEventListener('click', () => {
-  if (confirm('车会自己开动：先在这里扫描，再去二维码板前，再往场地中央走。确认车在启停区、周围没人？')) send('/start');
+  if (confirm('车会自己开动：雷达伸出去在这里扫描，再去二维码板前，再往场地中央走。确认车在启停区、启停区 1 车头朝 +Y / 启停区 2 车头朝 +X（雷达那个角朝场地里面）、周围没人？')) send('/start');
 });
 $('map').addEventListener('click', e => {
   if (app.mode === 'SURVEY') return;
@@ -1928,7 +1930,7 @@ $('poseSet').addEventListener('click', () => {
 document.querySelectorAll('[data-zone]').forEach(b => b.addEventListener('click', () => {
   $('pickX').value = 2250;
   $('pickY').value = b.dataset.zone;
-  $('pickH').value = 0;
+  $('pickH').value = b.dataset.heading; // 同固件的 COMP_START_HEADING_DEG：左后角的雷达朝场地里面
   app.picked = [2250, Number(b.dataset.zone)];
   drawMap();
 }));

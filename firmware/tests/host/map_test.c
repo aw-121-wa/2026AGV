@@ -35,5 +35,29 @@ int main(void)
     assert(Map_CanPoseHeading(1205, 1205, 1.0f, 10));
     assert(Map_CanPoseHeading(410, 755, 1.0f, 0));
     assert(!Map_CanPoseHeading(410, 755, 1.0f, 10));
+
+    /* 附加圆（伸出去的雷达）：车身放得下、圆出了场地或压到障碍物/禁区也不能站；加上才改版本，去掉不改。 */
+    assert(Map_WorldToGrid(2255, 1205, &r, &c) && Map_CanStand(r, c));
+    uint32_t revision = Map_Revision();
+    Map_SetAttachment(155.0f, 0.0f, 38.0f); /* 圆心 x = 2410，出了场地 */
+    assert(Map_Revision() == revision + 1U && !Map_CanStand(r, c));
+    Map_SetAttachment(155.0f, 0.0f, 38.0f);
+    assert(Map_Revision() == revision + 1U);
+    Map_SetAttachment(-155.0f, -155.0f, 38.0f); /* (2100, 1050)：车道里 */
+    assert(Map_CanStand(r, c));
+    assert(Map_AddObstacle(2100, 990, 25)); /* 离圆心 60 < 38 + 25 */
+    assert(!Map_CanStand(r, c));
+    Map_Init();
+    assert(Map_WorldToGrid(1205, 1205, &r, &c) && Map_CanStand(r, c));
+    Map_SetAttachment(-155.0f, -155.0f, 38.0f); /* (1050, 1050)：离左下的岛角 71 mm */
+    assert(Map_CanStand(r, c));
+    assert(Map_WorldToGrid(905, 1205, &r, &c) && Map_CanStand(r, c)); /* 圆心离岛 50 mm */
+    assert(Map_WorldToGrid(905, 1185, &r, &c) && !Map_CanStand(r, c)); /* 30 mm：压到岛，车身没压 */
+    revision = Map_Revision();
+    Map_SetAttachment(0.0f, 0.0f, 0.0f);
+    assert(Map_Revision() == revision && Map_CanStand(r, c));
+    Map_SetAttachment(-155.0f, -155.0f, 38.0f);
+    Map_Init();
+    assert(Map_CanStand(r, c));
     puts("map geometry OK");
 }

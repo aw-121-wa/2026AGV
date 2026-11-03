@@ -21,6 +21,10 @@ static uint8_t stand_bits[(MAP_CELLS + 7U) / 8U] AGV_RAM;
 static Obstacle obstacles[MAP_MAX_OBSTACLES];
 static uint8_t obstacle_count, initialized;
 static uint32_t revision;
+static struct
+{
+    float dx, dy, radius;
+} attachment; // 车身外附加的圆，radius 为 0 时没有
 static const Rect forbidden[] = {
     {MAP_ISLAND_LOW, MAP_ISLAND_LOW, MAP_ISLAND_LOW + MAP_ISLAND_SIZE,
      MAP_ISLAND_LOW + MAP_ISLAND_SIZE},
@@ -53,6 +57,28 @@ static uint8_t BoxFree(Rect b)
         float y = fmaxf(b.y0, fminf((float)obstacles[i].y, b.y1));
         float dx = x - obstacles[i].x, dy = y - obstacles[i].y;
         if (dx * dx + dy * dy <= (float)obstacles[i].radius * obstacles[i].radius)
+            return 0;
+    }
+    return 1;
+}
+
+/* 圆心 (x, y)、半径 r 的圆在场内，且不压禁区和障碍物吗。 */
+static uint8_t DiscFree(float x, float y, float r)
+{
+    if (x - r < -0.001f || y - r < -0.001f || x + r > MAP_WIDTH_MM + 0.001f ||
+        y + r > MAP_HEIGHT_MM + 0.001f)
+        return 0;
+    for (unsigned i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); ++i)
+    {
+        Rect q = forbidden[i];
+        float dx = x - fmaxf(q.x0, fminf(x, q.x1)), dy = y - fmaxf(q.y0, fminf(y, q.y1));
+        if (dx * dx + dy * dy < r * r)
+            return 0;
+    }
+    for (unsigned i = 0; i < obstacle_count; ++i)
+    {
+        float dx = x - obstacles[i].x, dy = y - obstacles[i].y, reach = r + obstacles[i].radius;
+        if (dx * dx + dy * dy <= reach * reach)
             return 0;
     }
     return 1;
@@ -91,6 +117,7 @@ void Map_Init(void)
 {
     obstacle_count = 0;
     memset(obstacles, 0, sizeof(obstacles));
+    attachment.dx = attachment.dy = attachment.radius = 0.0f;
     BuildStand(0, 0, MAP_ROWS - 1U, MAP_COLS - 1U, 0U);
     initialized = 1;
     ++revision;
@@ -111,13 +138,30 @@ uint8_t Map_IsFree(uint16_t row, uint16_t col)
                           (float)(col + 1U) * MAP_CELL_MM, (float)(row + 1U) * MAP_CELL_MM});
 }
 
-/* 查表判断栅格中心能否容纳车身和默认余量，O(1)。 */
+/* 查表判断栅格中心能否容纳车身和默认余量，O(1)；有附加圆时再查它，O(禁区 + 障碍物)。 */
 uint8_t Map_CanStand(uint16_t row, uint16_t col)
 {
     if (!initialized || row >= MAP_ROWS || col >= MAP_COLS)
         return 0;
     unsigned id = (unsigned)row * MAP_COLS + col;
-    return (stand_bits[id >> 3] >> (id & 7U)) & 1U;
+    if (!((stand_bits[id >> 3] >> (id & 7U)) & 1U))
+        return 0;
+    return attachment.radius <= 0.0f ||
+           DiscFree(CellCentre(col) + attachment.dx, CellCentre(row) + attachment.dy,
+                    attachment.radius);
+}
+
+void Map_SetAttachment(float dx, float dy, float radius)
+{
+    if (!isfinite(dx) || !isfinite(dy) || !isfinite(radius) || radius <= 0.0f)
+        dx = dy = radius = 0.0f;
+    if (dx == attachment.dx && dy == attachment.dy && radius == attachment.radius)
+        return;
+    attachment.dx = dx;
+    attachment.dy = dy;
+    attachment.radius = radius;
+    if (radius > 0.0f) // 去掉只会让更多地方能站：已经规划好的路线照样能走，不算地图变了
+        ++revision;
 }
 
 /* 带朝向的车体包络检查，用轴对齐外框做保守估计。 */

@@ -284,7 +284,7 @@ static void Chassis_PathControl(float dt)
         Chassis_PathAdvance(&goal);
         if (s_path_index >= s_path_count)
         {
-            Chassis_Stop();
+            Chassis_Finish(); // 已经停稳：只下发零速，不发急停帧
             chassis_path_result.completed = 1;
             s_heading_hold = 1;
         }

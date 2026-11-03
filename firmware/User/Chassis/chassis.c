@@ -90,6 +90,8 @@ static uint8_t s_wt_mask, s_wt_index, s_wt_settling;
 static uint32_t s_wt_start_ms;
 static float s_wt_start_deg;
 
+static void Chassis_Finish(void);
+
 /* 车体坐标系下的轮子位置/转速：驱动器读数乘安装方向。 */
 static float Chassis_WheelDeg(unsigned i)
 {
@@ -110,8 +112,49 @@ float Chassis_SpeedLimit(void)
     return s_move_speed_limit;
 }
 
+/* 每个轮子三类反馈（位置、转速、状态）发出去几条读取、几条没能入队。 */
+static uint32_t s_fb_sent[CHASSIS_WHEEL_NUM][3], s_fb_fail[CHASSIS_WHEEL_NUM][3];
+ChassisFeedbackFault chassis_feedback_fault;
+
+void Chassis_FeedbackDiag(unsigned i, ChassisFeedbackDiag *out)
+{
+    if (out == NULL || i >= CHASSIS_WHEEL_NUM)
+        return;
+    memset(out, 0, sizeof(*out));
+    memcpy(out->sent, s_fb_sent[i], sizeof(out->sent));
+    memcpy(out->fail, s_fb_fail[i], sizeof(out->fail));
+    const zdt_motor *m = wheel[i];
+    if (m == NULL)
+        return;
+    const uint32_t got[3] = {m->position_seq, m->speed_seq, m->status_seq};
+    const uint32_t at[3] = {m->position_ms, m->speed_ms, m->status_ms};
+    const uint8_t valid[3] = {m->position_seq != 0U, m->speed_valid, m->status_valid};
+    uint32_t now = HAL_GetTick();
+    for (unsigned k = 0; k < 3U; ++k)
+    {
+        out->got[k] = got[k];
+        out->valid[k] = valid[k];
+        out->age_ms[k] = now - at[k];
+    }
+}
+
 static void Chassis_Fault(chassis_fault reason, uint16_t detail)
 {
+    if (chassis.state != CHASSIS_STATE_FAULT)
+    {
+        chassis_feedback_fault.valid = 0U;
+        chassis_feedback_fault.at_ms = HAL_GetTick();
+        chassis_feedback_fault.bus_off = ZDT_BusOffCount();
+        chassis_feedback_fault.bus_errors = ZDT_BusErrors();
+        chassis_feedback_fault.rx_lost = ZDT_RxLost();
+        chassis_feedback_fault.rx_dropped = ZDT_RxDropped();
+        chassis_feedback_fault.tx_free = ZDT_TxFreeLevel();
+        chassis_feedback_fault.reason = (uint8_t)reason;
+        chassis_feedback_fault.detail = detail;
+        for (unsigned i = 0; i < CHASSIS_WHEEL_NUM; ++i)
+            Chassis_FeedbackDiag(i, &chassis_feedback_fault.wheel[i]);
+        chassis_feedback_fault.valid = 1U;
+    }
     Chassis_Stop();
     chassis.state = CHASSIS_STATE_FAULT;
     chassis.fault = (uint8_t)reason;
@@ -288,21 +331,29 @@ static void Chassis_StopAll(void)
     }
 }
 
-/* 每 CHASSIS_FEEDBACK_DIV 拍同时读取四轮位置，保证里程计用的是同一时刻的四轮数据；
-   错开半个周期轮询一个轴的转速和状态，单拍最多 4 帧，不挤占速度命令的 TX FIFO。 */
+/* 每 CHASSIS_FEEDBACK_DIV 拍里位置、转速、状态各占一拍，每拍给四个轮子各发一条同样的读取，四轮位置同一拍读，
+   里程计用的是同一时刻的数据。拍末排在这一拍所有命令（速度、停车、使能、解除保护，串口命令和流程发的也在内）
+   后面：一台驱动器一拍最多收两帧，这一拍已经有两条命令的（停车加零速、解除保护加零速）就不读，下一轮再读。
+   一拍收三帧，它对第一帧的应答正好撞上第三帧（ZDT_Flush）；原来一拍给一台驱动器连读转速和状态再加速度命令，
+   左前、右前的状态 6 秒没回过，走完一段又加一条急停时右后轮丢应答。 */
+#if CHASSIS_FEEDBACK_DIV < 3
+#error CHASSIS_FEEDBACK_DIV must leave one tick for each of position, speed and status
+#endif
 static void Chassis_RequestFeedback(void)
 {
-    uint32_t phase = chassis.cycle % CHASSIS_FEEDBACK_DIV;
-    if (phase == 0U)
+    static HAL_StatusTypeDef (*const request[3])(zdt_motor *) = {
+        ZDT_RequestPosition, ZDT_RequestSpeed, ZDT_RequestStatus};
+    uint32_t kind = chassis.cycle % CHASSIS_FEEDBACK_DIV;
+    if (kind >= 3U)
+        return;
+    for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM; ++i)
     {
-        for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM; ++i)
-            (void)ZDT_RequestPosition(wheel[i]);
-    }
-    else if (phase == CHASSIS_FEEDBACK_DIV / 2U)
-    {
-        zdt_motor *motor = wheel[(chassis.cycle / CHASSIS_FEEDBACK_DIV) % CHASSIS_WHEEL_NUM];
-        (void)ZDT_RequestSpeed(motor);
-        (void)ZDT_RequestStatus(motor);
+        if (ZDT_Staged(wheel[i]) >= 2U)
+            continue;
+        if (request[kind](wheel[i]) == HAL_OK)
+            ++s_fb_sent[i][kind];
+        else
+            ++s_fb_fail[i][kind];
     }
 }
 
@@ -428,7 +479,7 @@ static void Chassis_AutoControl(float dt, uint32_t now)
         Chassis_Fault(CHASSIS_FAULT_MOVE_TIMEOUT, 0U);
     else if (s_settle_us >= (uint32_t)(chassis_tune.settle_ms * 1000.0f))
     {
-        Chassis_Stop();
+        Chassis_Finish();
         s_heading_hold = 1U; // 正常完成后保持原目标；显式 S/故障停止仍完全撤去控制
     }
 }
@@ -472,7 +523,7 @@ static void Chassis_WheelControl(void)
     {
         chassis_wheel_result.active = 0U;
         ++chassis_wheel_result.seq;
-        Chassis_Stop();
+        Chassis_Finish();
         return;
     }
     s_wt_settling = 0U;
@@ -603,7 +654,6 @@ void Chassis_Update(void)
     ZDT_Service(); // CAN Bus-Off 自动恢复
     ZDT_ProcessData();
 
-    Chassis_RequestFeedback();
     Chassis_UpdateYaw();
     Chassis_UpdateOdometry();
     chassis.heading_error = Math_WrapDeg(chassis.heading_target - chassis.yaw);
@@ -622,8 +672,8 @@ void Chassis_Update(void)
     {
         if (s_recover)
             Chassis_Recover();
-        /* 停车帧入队失败时，继续重发零速。 */
-        s_force_apply = 1U;
+        /* 进故障时 Chassis_Stop 已经要求发零速，入队失败的下拍重发，发出去以后和静止时一样 100 ms
+           重发一次：每拍都发会一直占着总线，读反馈更难回来。 */
         Chassis_Apply();
         return;
     }
@@ -659,6 +709,8 @@ void Chassis_Update(void)
 
 void Chassis_CycleEnd(void)
 {
+    Chassis_RequestFeedback(); // 这一拍的命令都排好了（串口命令、流程发的停车也在内）再排读取
+    ZDT_Flush();
     uint32_t busy = Chassis_Micros() - s_last_us;
     if (busy > chassis.loop_peak_us)
         chassis.loop_peak_us = busy;
@@ -688,8 +740,9 @@ void Chassis_SetVelocity(float vx, float vy, float wz)
     }
 }
 
-/* 立即停车：清目标和斜坡、丢弃待执行请求、四轮发停止；故障解除后自动退回 READY。 */
-void Chassis_Stop(void)
+/* 停下来：清目标和斜坡、丢弃待执行请求，下发零速。自己做完的（定距、转向、路径、单轮测试）只用这个：
+   轮子已经停稳，不用再发急停帧，那一拍照常读反馈（有急停帧的那一拍不读，见 Chassis_RequestFeedback）。 */
+static void Chassis_Finish(void)
 {
     s_path_count = 0U;
     s_path_index = 0U;
@@ -703,6 +756,12 @@ void Chassis_Stop(void)
     s_heading_hold = 0U;
     s_heading_integral = 0.0f;
     chassis_wheel_result.active = 0U; // 中途停车：本次单轮测试作废，不出结果
+}
+
+/* 立即停车：Chassis_Finish 之外四轮再各发一条急停；故障解除后自动退回 READY。 */
+void Chassis_Stop(void)
+{
+    Chassis_Finish();
     Chassis_StopAll();
     if (chassis.state != CHASSIS_STATE_FAULT)
         return;

@@ -6,6 +6,7 @@
 #include "competition.h"
 #include "console.h"
 #include "ser_port.h"
+#include "servo.h"
 #include <assert.h>
 #include <math.h>
 #include <stdarg.h>
@@ -39,6 +40,21 @@ HAL_StatusTypeDef Chassis_FollowPath(const chassis_waypoint *points, unsigned co
 unsigned Chassis_PathTarget(void)
 {
     return 0U;
+}
+
+HAL_StatusTypeDef Chassis_TurnTo(float degrees)
+{
+    (void)degrees;
+    return HAL_BUSY;
+}
+
+void Servo_Init(void)
+{
+}
+
+void Servo_SetDeg(float deg)
+{
+    (void)deg;
 }
 
 const char *ChassisTelemetry_Num(float value, unsigned decimals)

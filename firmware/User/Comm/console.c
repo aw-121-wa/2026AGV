@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <string.h>
 #if AGV_MODE == AGV_MODE_COMPETITION
+#include "comp_config.h"
 #include "competition.h"
 #elif AGV_MODE == AGV_MODE_SURVEY
 #include "agv_run.h"
@@ -56,6 +57,8 @@ static const Param params[] = {
     LIDAR_PARAM(obs_width, 20.0f, 300.0f, 1U),
     LIDAR_PARAM(obs_match, 10.0f, 300.0f, 1U),
     LIDAR_PARAM(obs_confirm, 1.0f, 50.0f, 0U),
+    LIDAR_PARAM(servo_scan, 0.0f, COMP_SERVO_RANGE_DEG, 1U),
+    LIDAR_PARAM(servo_stow, 0.0f, COMP_SERVO_RANGE_DEG, 1U),
 #endif
 };
 #define PARAM_COUNT (sizeof(params) / sizeof(params[0]))

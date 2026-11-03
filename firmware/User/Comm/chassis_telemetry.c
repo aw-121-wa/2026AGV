@@ -167,14 +167,13 @@ static const char *ReasonText(uint16_t reason)
     return text;
 }
 
-static const char *FaultText(void)
+static const char *FaultText(uint8_t fault, uint16_t detail)
 {
     static char text[200];
-    switch (chassis.fault)
+    switch (fault)
     {
     case CHASSIS_FAULT_SENSOR:
-        (void)snprintf(text, sizeof(text), "feedback lost/motor fault:%s",
-                       ReasonText(chassis.fault_detail));
+        (void)snprintf(text, sizeof(text), "feedback lost/motor fault:%s", ReasonText(detail));
         break;
     case CHASSIS_FAULT_MOVE_TIMEOUT:
         (void)snprintf(text, sizeof(text), "move/turn timeout (blocked or slipping?)");
@@ -215,7 +214,8 @@ static void PrintStatus(uint32_t now)
     if (chassis.state == CHASSIS_STATE_IDLE)
         ChassisTelemetry_Printf(" | waiting:%s", ReasonText(Chassis_WaitReason()));
     else if (chassis.state == CHASSIS_STATE_FAULT)
-        ChassisTelemetry_Printf(" | fault: %s (send S)", FaultText());
+        ChassisTelemetry_Printf(" | fault: %s (send S)",
+                                FaultText(chassis.fault, chassis.fault_detail));
     ChassisTelemetry_Printf("\r\n");
 #if AGV_MODE == AGV_MODE_SURVEY
     ChassisTelemetry_Printf("          AGV state=%u err=%u leg=%u covered=0x%03x field=(%s,%s) "
@@ -285,6 +285,27 @@ void ChassisTelemetry_Help(void)
         Num(chassis_tune.cmd_speed, 0));
 }
 
+/* 一个轮子的反馈诊断：位置/转速/状态多久没更新（- 是还没收到过）、收到/发出几条、几条没能入队。
+   收到的明显少于发出的，就是驱动器没回或者回了没收到。 */
+static void FeedbackLine(const char *tag, unsigned i, const ChassisFeedbackDiag *d)
+{
+    char age[3][12];
+    for (unsigned k = 0; k < 3U; ++k)
+    {
+        if (d->valid[k])
+            (void)snprintf(age[k], sizeof(age[k]), "%lu", (unsigned long)d->age_ms[k]);
+        else
+            (void)snprintf(age[k], sizeof(age[k]), "-");
+    }
+    ChassisTelemetry_Printf("%s %s pos/speed/status age=%s/%s/%s ms got/sent=%lu/%lu %lu/%lu %lu/%lu "
+                            "fail=%lu/%lu/%lu\r\n",
+                            tag, k_wheel_name[i], age[0], age[1], age[2], (unsigned long)d->got[0],
+                            (unsigned long)d->sent[0], (unsigned long)d->got[1],
+                            (unsigned long)d->sent[1], (unsigned long)d->got[2],
+                            (unsigned long)d->sent[2], (unsigned long)d->fail[0],
+                            (unsigned long)d->fail[1], (unsigned long)d->fail[2]);
+}
+
 void ChassisTelemetry_Info(void)
 {
     uint32_t now = HAL_GetTick();
@@ -297,7 +318,7 @@ void ChassisTelemetry_Info(void)
                             Num(chassis.dt_actual * 1000.0f, 2));
     ChassisTelemetry_Printf("waiting/fault flags:%s\r\n", ReasonText(Chassis_WaitReason()));
     if (chassis.state == CHASSIS_STATE_FAULT)
-        ChassisTelemetry_Printf("fault: %s\r\n", FaultText());
+        ChassisTelemetry_Printf("fault: %s\r\n", FaultText(chassis.fault, chassis.fault_detail));
 #if CHASSIS_USE_IMU
     ChassisTelemetry_Printf("IMU: valid=%u yaw=%s age=%lums\r\n", (unsigned)imu.valid,
                             Num(imu.yaw, 3), (unsigned long)(now - imu.updated_ms));
@@ -312,16 +333,40 @@ void ChassisTelemetry_Info(void)
             continue;
         ChassisTelemetry_Printf(
             "motor %s addr=%u en=%u stall=%u prot=%u pos=%sdeg rpm=%s "
-            "rx_ok=%lu rx_err=%lu age=%lums ack=0x%02X\r\n",
+            "rx_ok=%lu rx_err=%lu age=%lums ack=0x%02X acked/cmd=%lu/%lu\r\n",
             k_wheel_name[i], (unsigned)m->address, (unsigned)m->enabled, (unsigned)m->stalled,
             (unsigned)m->protected_flag, Num(m->position_deg, 1), Num(m->speed_rpm, 1),
             (unsigned long)m->rx_frames, (unsigned long)m->rx_errors,
-            (unsigned long)(m->position_seq ? now - m->position_ms : 0U), (unsigned)m->ack_code);
+            (unsigned long)(m->position_seq ? now - m->position_ms : 0U), (unsigned)m->ack_code,
+            (unsigned long)m->acks, (unsigned long)m->commands);
     }
-    ChassisTelemetry_Printf(
-        "CAN: bus_off=%lu rx_dropped=%lu tx_free=%lu | serial tx_dropped=%lu\r\n",
-        (unsigned long)ZDT_BusOffCount(), (unsigned long)ZDT_RxDropped(),
-        (unsigned long)ZDT_TxFreeLevel(), tx_dropped);
+    for (unsigned i = 0; i < CHASSIS_WHEEL_NUM; ++i)
+    {
+        ChassisFeedbackDiag d;
+        Chassis_FeedbackDiag(i, &d);
+        FeedbackLine("FB  ", i, &d);
+    }
+    if (chassis_feedback_fault.valid)
+    {
+        /* 进故障那一刻的样子，留到下次进故障，S 清了故障也还在。 */
+        ChassisTelemetry_Printf("last fault @ %s s: %s\r\n",
+                                Num((float)chassis_feedback_fault.at_ms * 0.001f, 3),
+                                FaultText(chassis_feedback_fault.reason, chassis_feedback_fault.detail));
+        for (unsigned i = 0; i < CHASSIS_WHEEL_NUM; ++i)
+            FeedbackLine("SNAP", i, &chassis_feedback_fault.wheel[i]);
+        ChassisTelemetry_Printf("SNAP CAN: bus_off=%lu errors=%lu rx_lost=%lu rx_dropped=%lu "
+                                "tx_free=%lu\r\n",
+                                (unsigned long)chassis_feedback_fault.bus_off,
+                                (unsigned long)chassis_feedback_fault.bus_errors,
+                                (unsigned long)chassis_feedback_fault.rx_lost,
+                                (unsigned long)chassis_feedback_fault.rx_dropped,
+                                (unsigned long)chassis_feedback_fault.tx_free);
+    }
+    ChassisTelemetry_Printf("CAN: bus_off=%lu errors=%lu rx_lost=%lu rx_dropped=%lu tx_free=%lu | "
+                            "serial tx_dropped=%lu\r\n",
+                            (unsigned long)ZDT_BusOffCount(), (unsigned long)ZDT_BusErrors(),
+                            (unsigned long)ZDT_RxLost(), (unsigned long)ZDT_RxDropped(),
+                            (unsigned long)ZDT_TxFreeLevel(), tx_dropped);
     ChassisTelemetry_Printf("heading: peak_dynamic=%sdeg over_0.2deg=%lu cycles\r\n",
                             Num(chassis.heading_peak_dynamic, 3),
                             (unsigned long)chassis.heading_over_limit);
@@ -456,7 +501,8 @@ void ChassisTelemetry_Poll(void)
     {
         if (chassis.state == CHASSIS_STATE_FAULT)
             ChassisTelemetry_Printf("EVT  %s -> FAULT: %s. Send S to clear.\r\n",
-                                    StateName(last_state), FaultText());
+                                    StateName(last_state),
+                                    FaultText(chassis.fault, chassis.fault_detail));
         else if (chassis.state == CHASSIS_STATE_READY)
             ChassisTelemetry_Printf("EVT  %s -> READY%s\r\n", StateName(last_state),
                                     last_state == 0xFFU || last_state == CHASSIS_STATE_IDLE

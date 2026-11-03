@@ -26,6 +26,7 @@ typedef struct
         .lidar_min = COMP_LIDAR_MIN_MM, .lidar_max = COMP_LIDAR_MAX_MM,                            \
         .obs_gap = COMP_OBS_GAP_MM, .obs_width = COMP_OBS_MAX_WIDTH_MM,                            \
         .obs_match = COMP_OBS_MATCH_MM, .obs_confirm = (float)COMP_OBS_CONFIRM,                    \
+        .servo_scan = COMP_LIDAR_SERVO_SCAN_DEG, .servo_stow = COMP_LIDAR_SERVO_STOW_DEG,          \
     }
 
 LidarObsStats lidar_obs;
@@ -149,6 +150,13 @@ void LidarObs_Feed(const RPLidarSample *s, const LidarPose *pose)
     float a = (-s->angle_deg + lidar_tune.lidar_yaw) * MATH_DEG_TO_RAD;
     float bx = lidar_tune.lidar_x + s->dist_mm * cosf(a);
     float by = lidar_tune.lidar_y + s->dist_mm * sinf(a);
+    /* 车身轮廓里的点是车体自己：雷达在车角外，朝车身那 90° 打到的是车身，离雷达 400 mm 也有。 */
+    if (fabsf(bx) < ROBOT_LENGTH_MM * 0.5f + COMP_LIDAR_BODY_MM &&
+        fabsf(by) < ROBOT_WIDTH_MM * 0.5f + COMP_LIDAR_BODY_MM)
+    {
+        Cluster_Close();
+        return;
+    }
     float h = pose->heading_deg * MATH_DEG_TO_RAD, ch = cosf(h), sh = sinf(h);
     float x = pose->x + ch * bx - sh * by, y = pose->y + sh * bx + ch * by;
     if (!Interesting(x, y))
@@ -217,4 +225,13 @@ uint8_t LidarObs_PopNew(MapPoint *p)
             return 1;
         }
     return 0;
+}
+
+/* 候选未收敛时不能把暂时没有新增障碍物当作识别完成。 */
+uint8_t LidarObs_HasPending(void)
+{
+    for (unsigned i = 0; i < COMP_OBS_TRACKS; ++i)
+        if (tracks[i].used && !tracks[i].committed)
+            return 1U;
+    return 0U;
 }

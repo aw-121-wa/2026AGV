@@ -51,8 +51,13 @@ void Map_Init(void);
 /* 查询原始栅格是否空闲，不包含车身包络。 */
 uint8_t Map_IsFree(uint16_t row, uint16_t col);
 
-/* 判断栅格中心能否容纳车身和默认余量（查预计算的构型空间位图）。 */
+/* 判断栅格中心能否容纳车身和默认余量（查预计算的构型空间位图）；设了附加圆时它也要放得下。 */
 uint8_t Map_CanStand(uint16_t row, uint16_t col);
+
+/* 车身外多出来的一块圆（比如伸出去扫描的雷达）：圆心相对车体中心的场地偏移 (dx, dy)，半径 radius
+   已含余量；radius 为 0 去掉。设了以后 Map_CanStand 和用它的 A* 都要这块圆也放得下：在场内、不压
+   障碍物和禁区。加上或改了就递增地图版本，正在走的路线会重新检查；去掉不递增。Map_Init 会去掉它。 */
+void Map_SetAttachment(float dx, float dy, float radius);
 
 /* 将场地毫米坐标换算为行列号。 */
 uint8_t Map_WorldToGrid(int32_t x, int32_t y, uint16_t *row, uint16_t *col);

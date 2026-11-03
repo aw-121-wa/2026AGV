@@ -25,7 +25,7 @@
 
 /* 驱动器下发 */
 #define CHASSIS_DRV_ACC      0U // ZDT 加速度 RPM/s，0 = 驱动器不额外限制，交给软件斜坡
-#define CHASSIS_FEEDBACK_DIV 4U // 每 4 周期（20 ms）同时读四轮位置；转速/状态逐轴轮询，一圈 80 ms
+#define CHASSIS_FEEDBACK_DIV 4U // 每 4 周期（20 ms）位置、转速、状态各读一次，每次四轮一起读
 #define CHASSIS_ENABLE_DIV   20U // 每 20 周期（100 ms）重发使能
 #define CHASSIS_RESEND_DIV   20U // 每 20 周期（100 ms）强制重发速度，兜底丢帧
 
@@ -222,7 +222,7 @@ void Chassis_SetVelocity(float vx, float vy, float wz);
 void Chassis_Stop(void);
 // 只在一个任务里按 CHASSIS_PERIOD_US 周期调用。
 void Chassis_Update(void);
-// 底盘任务做完这一拍的所有事后调用，统计单拍占用。
+// 底盘任务做完这一拍的所有事后调用：排上反馈读取，把这一拍要发的 CAN 帧一起发出去，统计单拍占用。
 void Chassis_CycleEnd(void);
 // 单调递增的微秒时基，供任务层对齐节拍。
 // 注意：内部有状态（会推进累加器），只在底盘任务里调用；回绕周期约 71.6 分钟。
@@ -243,6 +243,24 @@ HAL_StatusTypeDef Chassis_WheelTest(uint8_t mask);
 uint16_t Chassis_WaitReason(void);
 // 只读访问第 i 个轮子的驱动状态，给串口诊断用。
 const zdt_motor *Chassis_Wheel(unsigned i);
+/* 一个轮子的反馈诊断，数组顺序是位置、转速、状态：多久没更新（valid 为 0 时还没收到过），
+   发出去几条读取、收到几条回复、几条没能入队，都从上电累计。 */
+typedef struct
+{
+    uint32_t age_ms[3], sent[3], got[3], fail[3];
+    uint8_t valid[3];
+} ChassisFeedbackDiag;
+void Chassis_FeedbackDiag(unsigned i, ChassisFeedbackDiag *out);
+// 最近一次进故障那一刻的四轮反馈诊断，留到下次进故障。
+typedef struct
+{
+    uint32_t at_ms;
+    uint32_t bus_off, bus_errors, rx_lost, rx_dropped, tx_free;
+    uint16_t detail; // 同 chassis.fault_detail
+    uint8_t valid, reason;
+    ChassisFeedbackDiag wheel[CHASSIS_WHEEL_NUM];
+} ChassisFeedbackFault;
+extern ChassisFeedbackFault chassis_feedback_fault;
 // 当前自主运动限速 mm/s。
 float Chassis_SpeedLimit(void);
 

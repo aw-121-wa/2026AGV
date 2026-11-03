@@ -11,7 +11,8 @@ import sys
 ROOT =Path(__file__).resolve().parents[1]
 BUILD = Path(os.environ.get('AGV_HOST_BUILD') or ROOT / 'build' / 'host')
 INCLUDES = ['tests/host', 'User/Config', 'User/Common', 'User/Drivers/HWT101',
-            'User/Drivers/ZDT_X42S', 'User/Drivers/RPLidar', 'User/Drivers/SerPort', 'User/Chassis',
+            'User/Drivers/ZDT_X42S', 'User/Drivers/RPLidar', 'User/Drivers/SerPort',
+            'User/Drivers/Servo', 'User/Chassis',
             'User/Comm', 'User/Navigation', 'User/App']
 CFLAGS = ['gcc', '-std=c11', '-Wall', '-Wextra', '-Werror'] + ['-I' + i for i in INCLUDES]
 NAV = ['User/Navigation/map.c', 'User/Navigation/astar.c', 'User/Navigation/survey.c']

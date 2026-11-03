@@ -226,20 +226,22 @@ static void TestObstacles(void)
 }
 
 /* C1 的模型比 RunScans 严：0.72° 步进、每圈相位随机、测距 ±30 mm，圆柱边缘打不回来（只有中间
-   70% 的宽度有回波）。对角 2.9 m 处 Ø50 每圈只打到一个点左右。 */
-static unsigned ScanOne(float sx, float sy, float cx, float cy, MapPoint *list)
+   70% 的宽度有回波）。对角 2.9 m 处 Ø50 每圈只打到一个点左右。从雷达的安装位置打。 */
+static unsigned ScanOne(float sx, float sy, float heading, float cx, float cy, MapPoint *list)
 {
     Map_Init();
     LidarObs_Init();
-    LidarPose pose = {sx, sy, 0.0f};
+    LidarPose pose = {sx, sy, heading};
+    float hr = pose.heading_deg * MATH_DEG_TO_RAD;
+    float ox = sx + cosf(hr) * mount_x - sinf(hr) * mount_y, oy = sy + sinf(hr) * mount_x + cosf(hr) * mount_y;
     for (unsigned k = 0; k <= COMP_SCAN_REVS; ++k)
     {
         float phase = Noise(0.36f) + 0.36f;
         for (unsigned i = 0; i < 500; ++i)
         {
-            float a = i * 0.72f + phase, world = -a * MATH_DEG_TO_RAD;
+            float a = i * 0.72f + phase, world = (pose.heading_deg + mount_yaw - a) * MATH_DEG_TO_RAD;
             float dx = cosf(world), dy = sinf(world);
-            float px = cx - sx, py = cy - sy, b = px * dx + py * dy;
+            float px = cx - ox, py = cy - oy, b = px * dx + py * dy;
             float miss = hypotf(px - b * dx, py - b * dy);
             float d = b > 0.0f && miss < 25.0f * 0.7f ? b - sqrtf(625.0f - miss * miss) : 0.0f;
             RPLidarSample s = {a, d > 0.0f ? d + Noise(30.0f) : 0.0f, 47, i == 0};
@@ -250,8 +252,9 @@ static unsigned ScanOne(float sx, float sy, float cx, float cy, MapPoint *list)
     return LidarObs_List(list, 16);
 }
 
-/* 开局一次扫描要能看到全场：车道上任意位置，紧贴黄色区域的也算（它们是平的，不挡雷达）。
-   定位误差不能超过地图里留的余量，否则车会蹭到。 */
+/* 识别精度：在启停区扫一次，车道上任意位置都认得出，紧贴黄色区域的也算（它们是平的，不挡雷达）。
+   定位误差不能超过地图里留的余量，否则车会蹭到。这里不算车身挡住的 90°：哪些地方看得到见
+   comp_route_test 和 README 的漏检率。 */
 static void TestGlobalScanSeesTheWholeField(void)
 {
     static const float box[][4] = {{550, 550, 1000, 1000},  {1400, 550, 1850, 1000},
@@ -275,14 +278,14 @@ static void TestGlobalScanSeesTheWholeField(void)
                 if (!lane)
                     continue;
                 ++tried;
-                assert(ScanOne((float)home.x, (float)home.y, x, y, list) == 1U);
+                assert(ScanOne((float)home.x, (float)home.y, COMP_START_HEADING_DEG(zone), x, y, list) == 1U);
                 worst = fmaxf(worst, hypotf(list[0].x - x, list[0].y - y));
             }
     }
     /* 紧贴黄色区域边上，朝车的那一面离它不到 40 mm。 */
     MapPoint home;
     assert(Map_StartPoint(1, &home));
-    assert(ScanOne((float)home.x, (float)home.y, 1370.0f, 1200.0f, list) == 1U);
+    assert(ScanOne((float)home.x, (float)home.y, COMP_START_HEADING_DEG(1), 1370.0f, 1200.0f, list) == 1U);
     worst = fmaxf(worst, hypotf(list[0].x - 1370.0f, list[0].y - 1200.0f));
     printf("global scan: %u positions, worst error %.1f mm\n", tried, (double)worst);
     assert(worst <= (float)COMP_OBS_MAP_RADIUS - COMP_OBS_RADIUS_MM + (float)MAP_MARGIN_MM);
@@ -290,11 +293,13 @@ static void TestGlobalScanSeesTheWholeField(void)
     LidarObs_Init();
 }
 
-/* 从第一个位置被挡住的，换个位置看到后追加进地图，只报告这一个新的。 */
+/* 从第一个位置被挡住的，换个位置看到后追加进地图，只报告这一个新的。启停区 1 的雷达在
+   (2095,2095)，(265,1287) 正好在 (1200,1700) 后面。 */
 static void TestLaterScanAddsHiddenObstacle(void)
 {
-    static const Cyl lined_up[2] = {{1200, 1700, 25}, {300, 1200, 25}};
-    LidarPose start = {2250, 2250, 0.0f}, board = {2205, 1205, 0.0f};
+    static const Cyl lined_up[2] = {{1200, 1700, 25}, {265, 1287, 25}};
+    LidarPose start = {2250, 2250, COMP_START_HEADING_DEG(1)};
+    LidarPose board = {COMP_QR_STOP_X_MM, COMP_QR_Y_MIN_MM, COMP_QR_HEADING_DEG};
     MapPoint list[16], p;
     Map_Init();
     LidarObs_Init();
@@ -304,7 +309,7 @@ static void TestLaterScanAddsHiddenObstacle(void)
     assert(hypotf(p.x - 1200.0f, p.y - 1700.0f) < 30.0f && !LidarObs_PopNew(&p));
     RunScans(&board, lined_up, 2, 20);
     assert(LidarObs_Finish() == 2 && Map_Revision() == rev + 2 && LidarObs_PopNew(&p));
-    assert(hypotf(p.x - 300.0f, p.y - 1200.0f) < 30.0f && !LidarObs_PopNew(&p));
+    assert(hypotf(p.x - 265.0f, p.y - 1287.0f) < 30.0f && !LidarObs_PopNew(&p));
     assert(LidarObs_List(list, 16) == 2);
     Map_Init();
     LidarObs_Init();
@@ -314,8 +319,9 @@ static void TestLaterScanAddsHiddenObstacle(void)
 static void TestOnlyTurntableIsIgnored(void)
 {
     MapPoint list[16];
-    assert(ScanOne(2250.0f, 2250.0f, 1200.0f, 2320.0f, list) == 0U);
-    assert(ScanOne(2250.0f, 2250.0f, 600.0f, 2290.0f, list) == 1U);
+    const float h = COMP_START_HEADING_DEG(1);
+    assert(ScanOne(2250.0f, 2250.0f, h, 1200.0f, 2320.0f, list) == 0U);
+    assert(ScanOne(2250.0f, 2250.0f, h, 600.0f, 2290.0f, list) == 1U);
     Map_Init();
     LidarObs_Init();
 }
@@ -357,14 +363,15 @@ static unsigned CountObstacles(unsigned scans, MapPoint *list)
     return LidarObs_List(list, 16);
 }
 
+/* 参数恢复默认，雷达放在车体中心：这几个测试和安装位置无关，要改安装位置的自己改。 */
 static void BeginTuning(void)
 {
     Map_Init();
     LidarObs_Init();
     lidar_tune = lidar_tune_default;
-    mount_x = COMP_LIDAR_X_MM;
-    mount_y = COMP_LIDAR_Y_MM;
-    mount_yaw = COMP_LIDAR_YAW_DEG;
+    mount_x = lidar_tune.lidar_x = 0.0f;
+    mount_y = lidar_tune.lidar_y = 0.0f;
+    mount_yaw = lidar_tune.lidar_yaw = 0.0f;
 }
 
 static void TestLidarTuning(void)
@@ -457,6 +464,34 @@ static void TestSightLineStartsAtLidar(void)
     BeginTuning();
 }
 
+/* 无噪声的一小段弧：雷达角度 centre ±2°，距离 dist。 */
+static void FeedArcAt(const LidarPose *pose, int centre, float dist, unsigned scans)
+{
+    for (unsigned k = 0; k < scans; ++k)
+        for (int a = centre - 2; a <= centre + 2; ++a)
+        {
+            RPLidarSample s = {(float)((a + 360) % 360), dist, 47, a == centre - 2};
+            LidarObs_Feed(&s, pose);
+        }
+}
+
+/* 雷达在左后角外 (-155,155)：朝车身打到的是车身，离雷达 115 mm 也是车体自己，不算障碍物（按离雷达
+   多远来分，这些点就成了压在车底下的障碍物）；往车外打的才算。 */
+static void TestBodyPointsAreIgnored(void)
+{
+    MapPoint list[16];
+    LidarPose pose = {1200, 1200, 0.0f};
+    BeginTuning();
+    lidar_tune = lidar_tune_default;
+    assert(lidar_tune.lidar_x == -155.0f && lidar_tune.lidar_y == 155.0f);
+    FeedArcAt(&pose, 10, 115.0f, 12); // 雷达角度顺时针：10° 是车头偏右，打在车身左边上
+    assert(LidarObs_Finish() == 0);
+    FeedArcAt(&pose, 270, 200.0f, 12); // 车左边，离车身 220 mm
+    assert(LidarObs_Finish() == 1 && LidarObs_List(list, 16) == 1);
+    assert(fabsf((float)list[0].x - 1045.0f) <= 1.0f && fabsf((float)list[0].y - 1571.0f) <= 1.0f);
+    BeginTuning();
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -469,6 +504,7 @@ int main(void)
     TestSplitTargetCountsOnce();
     TestLidarTuning();
     TestSightLineStartsAtLidar();
+    TestBodyPointsAreIgnored();
     printf("comp_test OK\n");
     return 0;
 }

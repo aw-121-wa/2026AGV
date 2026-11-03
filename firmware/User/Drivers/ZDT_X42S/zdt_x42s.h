@@ -51,6 +51,10 @@ typedef struct
     uint32_t speed_ms;
     uint32_t status_ms;
     uint32_t position_seq; // 每收到一帧位置加 1，跳过 0
+    uint32_t speed_seq;    // 每收到一帧转速加 1
+    uint32_t status_seq;   // 每收到一帧状态加 1
+    uint32_t commands;     // 发出去的命令（使能、速度、停止等，不含读取和广播同步）
+    uint32_t acks;         // 收到的命令应答：比 commands 少得多就是命令或应答丢了
     uint32_t rx_frames;    // 校验通过的帧数
     uint32_t rx_errors;    // 校验失败或字段长度不符的帧数
 } zdt_motor;
@@ -79,10 +83,18 @@ HAL_StatusTypeDef ZDT_RequestPosition(zdt_motor *motor);
 HAL_StatusTypeDef ZDT_RequestSpeed(zdt_motor *motor);
 HAL_StatusTypeDef ZDT_RequestStatus(zdt_motor *motor);
 
-// TX FIFO 剩余空位，调用方据此保证一组命令完整入队。
+// TX FIFO 剩余空位（扣掉这一拍已经攒下的帧），调用方据此保证一组命令完整入队。
 uint32_t ZDT_TxFreeLevel(void);
+// 上面的命令和读取都先攒着：每拍末尾调用一次，按电机分组交给 TX FIFO（地址大的先发，广播最后）。
+void ZDT_Flush(void);
+// 这一拍已经给这台电机攒下几帧（还没交给硬件）。
+uint8_t ZDT_Staged(const zdt_motor *motor);
 // 接收软件队列满导致丢弃的帧数。
 uint32_t ZDT_RxDropped(void);
+// 硬件接收 FIFO 满、丢了帧的次数（中断没来得及取走）。
+uint32_t ZDT_RxLost(void);
+// 总线错误累计：每出一次错误帧（含两个节点同时发同一个 ID 撞上）加 1。
+uint32_t ZDT_BusErrors(void);
 // 总线关闭次数（每次自动恢复加 1），调试器/遥测查看。
 uint32_t ZDT_BusOffCount(void);
 // 在底盘任务里每拍调用：检测 FDCAN Bus-Off 并自动恢复（内部限频 100 ms）。

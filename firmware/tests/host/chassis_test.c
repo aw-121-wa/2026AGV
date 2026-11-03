@@ -79,12 +79,14 @@ HAL_StatusTypeDef ZDT_SyncTrigger(void)
     ++sync_triggers;
     return HAL_OK;
 }
+static unsigned stop_frames; /* 发出去的急停帧 */
 HAL_StatusTypeDef ZDT_Stop(zdt_motor *m, zdt_sync sync)
 {
     (void)sync;
     if (fail_send)
         return HAL_ERROR;
     output[m->address - 1] = 0;
+    ++stop_frames;
     return HAL_OK;
 }
 uint32_t ZDT_TxFreeLevel(void)
@@ -96,20 +98,30 @@ HAL_StatusTypeDef ZDT_EnableMotor(zdt_motor *m, uint8_t en)
     m->enabled = en;
     return HAL_OK;
 }
+/* 这一拍发出的读取：种类（0 位置、1 转速、2 状态）和电机地址。 */
+static uint8_t requests[16][2];
+static unsigned request_count;
+static HAL_StatusTypeDef Request(zdt_motor *m, uint8_t kind)
+{
+    if (request_count < 16U)
+    {
+        requests[request_count][0] = kind;
+        requests[request_count][1] = m->address;
+        ++request_count;
+    }
+    return HAL_OK;
+}
 HAL_StatusTypeDef ZDT_RequestPosition(zdt_motor *m)
 {
-    (void)m;
-    return HAL_OK;
+    return Request(m, 0U);
 }
 HAL_StatusTypeDef ZDT_RequestSpeed(zdt_motor *m)
 {
-    (void)m;
-    return HAL_OK;
+    return Request(m, 1U);
 }
 HAL_StatusTypeDef ZDT_RequestStatus(zdt_motor *m)
 {
-    (void)m;
-    return HAL_OK;
+    return Request(m, 2U);
 }
 void ZDT_ProcessData(void)
 {
@@ -117,12 +129,30 @@ void ZDT_ProcessData(void)
 void ZDT_Service(void)
 {
 }
+static unsigned flushes;
+void ZDT_Flush(void)
+{
+    ++flushes;
+}
+static uint8_t staged[4]; /* 假装这一拍已经给各台攒了几帧 */
+uint8_t ZDT_Staged(const zdt_motor *m)
+{
+    return staged[m->address - 1];
+}
 static unsigned clear_calls;
 HAL_StatusTypeDef ZDT_ClearProtection(zdt_motor *m)
 {
     m->stalled = m->protected_flag = 0;
     ++clear_calls;
     return HAL_OK;
+}
+uint32_t ZDT_BusErrors(void)
+{
+    return 7U;
+}
+uint32_t ZDT_RxLost(void)
+{
+    return 2U;
 }
 uint32_t ZDT_BusOffCount(void)
 {
@@ -254,6 +284,83 @@ static void command(UART_HandleTypeDef *u, const char *text)
     memcpy(rx_buf, text, n);
     HAL_UARTEx_RxEventCallback(u, (uint16_t)n);
     ChassisCmd_Poll();
+}
+/* 每 4 拍里位置、转速、状态各一拍，每拍四个轮子各读一条，剩下一拍不读；发出去的条数记在诊断里。
+   读取在拍末排在这一拍的命令后面，和命令一起发；已经有两条命令的那台这一拍不读。 */
+static void TestFeedbackRequests(void)
+{
+    ChassisFeedbackDiag before, after;
+    Chassis_FeedbackDiag(3U, &before);
+    unsigned kinds = 0U, quiet = 0U;
+    for (int t = 0; t < 8; ++t)
+    {
+        tick(1);
+        request_count = 0U;
+        unsigned f = flushes;
+        Chassis_CycleEnd();
+        assert(flushes == f + 1U);
+        if (request_count == 0U)
+        {
+            ++quiet;
+            continue;
+        }
+        assert(request_count == 4U);
+        for (unsigned i = 0; i < 4U; ++i)
+            assert(requests[i][0] == requests[0][0] && requests[i][1] == i + 1U);
+        kinds |= 1U << requests[0][0];
+    }
+    assert(kinds == 7U && quiet == 2U);
+    Chassis_FeedbackDiag(3U, &after);
+    for (unsigned k = 0; k < 3U; ++k)
+        assert(after.sent[k] == before.sent[k] + 2U && after.fail[k] == before.fail[k]);
+    /* 右后轮这一拍已经有停车和零速两条：只读另外三台，没读的不算发出去。 */
+    for (int t = 0; t < 4; ++t)
+    {
+        tick(1);
+        staged[3] = 2U;
+        request_count = 0U;
+        Chassis_CycleEnd();
+        staged[3] = 0U;
+        if (request_count == 0U)
+            continue;
+        assert(request_count == 3U);
+        for (unsigned i = 0; i < 3U; ++i)
+            assert(requests[i][1] == i + 1U);
+    }
+    ChassisFeedbackDiag skipped;
+    Chassis_FeedbackDiag(3U, &skipped);
+    for (unsigned k = 0; k < 3U; ++k)
+        assert(skipped.sent[k] == after.sent[k]);
+}
+/* 自己走完（定距、路径）只下发零速，不发急停帧：急停、零速和读取挤在同一拍，排在最后的右后轮会丢应答。
+   S 才发急停。 */
+static void TestFinishSendsNoStopFrames(UART_HandleTypeDef *u)
+{
+    unsigned before = stop_frames;
+    assert(Chassis_MoveDistance(100, 0) == HAL_OK);
+    complete();
+    command(u, "F100\n");
+    complete();
+    assert(stop_frames == before);
+    assert(output[0] == 0 && output[1] == 0 && output[2] == 0 && output[3] == 0);
+    command(u, "S\n");
+    assert(stop_frames == before + 4U);
+}
+/* 反馈断了进故障：零速发出去以后不再每拍重发，和静止时一样 100 ms 一次，总线留给读反馈。 */
+static void TestFaultResendsSlowly(void)
+{
+    tick(1);
+    for (int i = 0; i < 102; i++)
+        tick(0);
+    assert(chassis.state == CHASSIS_STATE_FAULT);
+    unsigned triggers = sync_triggers;
+    for (int i = 0; i < 100; i++)
+        tick(0);
+    assert(sync_triggers - triggers <= 100U / CHASSIS_RESEND_DIV + 1U);
+    tick(1);
+    Chassis_Stop();
+    tick(1);
+    assert(chassis.state == CHASSIS_STATE_READY);
 }
 int main(void)
 {
@@ -468,7 +575,20 @@ int main(void)
     for (int i = 0; i < 10000; i++)
         tick(1);
     assert(chassis.state == CHASSIS_STATE_FAULT); // Extended timeout still terminates a stuck move.
+    assert(chassis_feedback_fault.valid);
+    assert(chassis_feedback_fault.bus_errors == 7U && chassis_feedback_fault.rx_lost == 2U);
+    assert(chassis_feedback_fault.reason == CHASSIS_FAULT_MOVE_TIMEOUT);
+    uint32_t captured = chassis_feedback_fault.at_ms;
     Chassis_Stop();
+    assert(chassis_feedback_fault.valid && chassis_feedback_fault.at_ms == captured);
+    ChassisFeedbackDiag diag;
+    Chassis_FeedbackDiag(0U, &diag);
+    assert(diag.valid[0] && diag.valid[1] && diag.valid[2]);
+    tick(1);
+    assert(chassis.state == CHASSIS_STATE_READY);
+    TestFeedbackRequests();
+    TestFaultResendsSlowly();
+    TestFinishSendsNoStopFrames(&uart);
     Chassis_SetMoveSpeedLimit(400);
     uint32_t before = Chassis_Micros();
     host_clock.CYCCNT += 480U;
@@ -479,6 +599,7 @@ int main(void)
     host_clock.CYCCNT += 480U;
     assert(Chassis_Micros() - before == 1U);
     puts("PASS: distance, heading disturbance, world coordinates, turns, parsing, feedback loss, "
-         "timeout, stop retry, DWT wrap");
+         "timeout, stop retry, feedback request schedule, fault resend rate, no stop frame on finish, "
+         "DWT wrap");
     return 0;
 }

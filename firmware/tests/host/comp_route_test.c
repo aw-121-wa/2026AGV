@@ -1,5 +1,7 @@
-/* 比赛模式闭环：真实的底盘、控制台、文本输出、雷达识别、地图和 A*，电机、陀螺仪和串口是假的。
-   验证开局流程扫完全图、不撞看不见的障碍物，路线能规划能走到，以及文本输出不改变底盘控制。 */
+/* 比赛模式闭环：真实的底盘、控制台、文本输出、雷达识别、地图和 A*，电机、陀螺仪、舵机和串口是假的。
+   假雷达在车身左后角外，朝车身那 90° 打到车身；舵机把它伸出去到位才测得到东西。
+   验证开局流程边走边扫找全障碍物、看得清的路段不撞看不见的障碍物（伸着的雷达也算），路线能规划能走到，
+   以及文本输出不改变底盘控制。 */
 #define main original_chassis_tests
 #include "chassis_test.c"
 #undef main
@@ -7,10 +9,39 @@
 #include "comp_config.h"
 #include "competition.h"
 #include "ser_port.h"
+#include "servo.h"
 
 static UART_HandleTypeDef uart;
+static uint8_t boot_zone = 1U;
+
+/* ---------- 假舵机：记下最近一次给的角度和时间 ---------- */
+static float servo_at = -1.0f;
+static uint32_t servo_since;
+static unsigned servo_calls;
+
+void Servo_Init(void)
+{
+}
+
+void Servo_SetDeg(float deg)
+{
+    servo_at = deg;
+    servo_since = ms;
+    ++servo_calls;
+}
+
+/* 雷达伸出去到位了吗。没到位时雷达还在车身里（或者正在动），测不到东西。 */
+static uint8_t LidarDeployed(void)
+{
+    return servo_at == lidar_tune.servo_scan && ms - servo_since >= COMP_LIDAR_SERVO_MS;
+}
 
 /* ---------- 假串口：雷达按 C1 的 5 kHz、0.72° 出点；扫码模块在二维码板前连续读码 ---------- */
+/* 扫码模块对着 +X：车头朝开局方向、板子中心正对它 ±15 mm、车走得慢时才读得到。比真模块苛刻，
+   逼着车沿板找。 */
+#define SCANNER_WINDOW_MM    15.0f
+#define SCANNER_MAX_SPEED_MM 80.0f
+static float board_y = 1200.0f, robot_speed, last_x, last_y;
 static SerPortStats ser_stats[SER_COUNT];
 static uint8_t ser_rx_on[SER_COUNT];
 static unsigned ser_reads[SER_COUNT], lidar_commands, lidar_stops;
@@ -78,11 +109,38 @@ static float Ray(float ox, float oy, float dx, float dy)
     return best;
 }
 
+/* 雷达这一线打出去多远（雷达角度顺时针）。雷达在车身外：朝车身打的那些打到 270 见方的车身边上，
+   其余的在场地里找障碍物，没打到返回 0。 */
+static float LidarRange(float angle)
+{
+    float body = (lidar_tune.lidar_yaw - angle) * MATH_DEG_TO_RAD; // 车体系方向，逆时针
+    const float o[2] = {lidar_tune.lidar_x, lidar_tune.lidar_y}, d[2] = {cosf(body), sinf(body)};
+    float t0 = 0.0f, t1 = 1e9f;
+    for (unsigned k = 0; k < 2U; ++k)
+    {
+        if (fabsf(d[k]) < 1e-6f)
+        {
+            if (fabsf(o[k]) > 135.0f)
+                t1 = -1.0f;
+            continue;
+        }
+        float a = (-135.0f - o[k]) / d[k], b = (135.0f - o[k]) / d[k];
+        t0 = fmaxf(t0, fminf(a, b));
+        t1 = fminf(t1, fmaxf(a, b));
+    }
+    if (t0 > 0.0f && t0 <= t1)
+        return t0 + 1.0f;
+    float h = comp.heading_deg * MATH_DEG_TO_RAD, ch = cosf(h), sh = sinf(h);
+    float ox = comp.x + ch * o[0] - sh * o[1], oy = comp.y + sh * o[0] + ch * o[1];
+    return Ray(ox, oy, ch * d[0] - sh * d[1], sh * d[0] + ch * d[1]);
+}
+
 unsigned SerPort_Read(SerId id, uint8_t *dst, unsigned max)
 {
     ++ser_reads[id];
     if (id == SER_SCANNER && scanner_code && ser_rx_on[id] && comp.anchored && comp.x > 2100.0f &&
-        fabsf(comp.y - 1200.0f) < 150.0f)
+        fabsf(Math_WrapDeg(comp.heading_deg - COMP_QR_HEADING_DEG)) < 10.0f &&
+        fabsf(comp.y - board_y) < SCANNER_WINDOW_MM && robot_speed < SCANNER_MAX_SPEED_MM)
     {
         size_t length = strlen(scanner_code);
         memcpy(dst, scanner_code, length);
@@ -102,8 +160,7 @@ unsigned SerPort_Read(SerId id, uint8_t *dst, unsigned max)
     {
         --lidar_budget;
         float angle = (float)lidar_index * 0.72f;
-        float r = (comp.heading_deg - angle) * MATH_DEG_TO_RAD;
-        float d = comp.anchored ? Ray(comp.x, comp.y, cosf(r), sinf(r)) : 0.0f;
+        float d = comp.anchored && LidarDeployed() ? LidarRange(angle) : 0.0f;
         uint16_t aq = (uint16_t)lroundf(angle * 64.0f), dq = (uint16_t)lroundf(d * 4.0f);
         dst[n++] = (uint8_t)((15U << 2) | (lidar_index == 0U ? 1U : 2U));
         dst[n++] = (uint8_t)(((aq & 0x7FU) << 1) | 1U);
@@ -133,6 +190,9 @@ static void Step(void)
         uart_done_ms = ms + tx_length * 87U / 1000U + 1U;
     host_clock.CYCCNT += extra_busy_cycles;
     Chassis_CycleEnd();
+    robot_speed = hypotf(comp.x - last_x, comp.y - last_y) * 200.0f; // 一拍 5 ms
+    last_x = comp.x;
+    last_y = comp.y;
 }
 
 static void Steps(unsigned n)
@@ -209,8 +269,8 @@ static void Boot(unsigned obstacle_count, const float (*obstacles)[2])
     lidar_on = lidar_descriptor = 0U;
     lidar_index = lidar_budget = lidar_commands = lidar_stops = 0U;
     memset(ser_reads, 0, sizeof(ser_reads));
-    Agv_Init(AGV_MODE, 1U);
-    assert(Comp_Init(1U) == HAL_OK);
+    Agv_Init(AGV_MODE, boot_zone);
+    assert(Comp_Init(boot_zone) == HAL_OK);
     Line("/reset");
     Line("/set cmd_speed 400");
     Line("D0");
@@ -231,7 +291,7 @@ static void WaitScanEnd(void)
     assert(comp.lidar_state >= COMP_LIDAR_DONE);
 }
 
-/* 上电，等位姿定下来，在启停区扫一次。 */
+/* 上电，等位姿定下来，在启停区扫一次，等雷达收好（没收好时规划要把伸着的雷达算进去）。 */
 static void BootAndScan(unsigned obstacle_count, const float (*obstacles)[2])
 {
     Boot(obstacle_count, obstacles);
@@ -239,6 +299,8 @@ static void BootAndScan(unsigned obstacle_count, const float (*obstacles)[2])
     Line("/scan");
     WaitScanEnd();
     assert(comp.lidar_state == COMP_LIDAR_DONE);
+    while (ms - servo_since < COMP_LIDAR_SERVO_MS)
+        Step();
     ClearOutput();
 }
 
@@ -397,8 +459,66 @@ static void TestPoseDuringScanRestartsIt(void)
     assert(comp.lidar_state == COMP_LIDAR_DONE && lidar_obs.scans > COMP_SCAN_REVS);
 }
 
+/* 舵机：平时收着，不会每拍都发；开局先伸出去，到位以前一个雷达点都不用，第一轮扫完车才走；走着雷达
+   一直伸着、接着用点，扫完才收回来。/set 改角度马上转过去，台架上能直接看伸出去的位置对不对。 */
+static void TestLidarServoMovesAroundScans(void)
+{
+    Boot(1U, kThree);
+    WaitAnchored();
+    servo_calls = 0U;
+    Steps(100U);
+    assert(servo_at == COMP_LIDAR_SERVO_STOW_DEG && servo_calls == 0U);
+    Line("/start");
+    unsigned points = lidar_obs.points;
+    Steps(1U);
+    assert(servo_at == COMP_LIDAR_SERVO_SCAN_DEG && lidar_obs.points == points);
+    while (ms - servo_since < COMP_LIDAR_SERVO_MS)
+    {
+        assert(lidar_obs.points == points);
+        Step();
+    }
+    while (comp.run_state == COMP_RUN_SCAN)
+    {
+        assert(chassis.mode == CHASSIS_MODE_VEL);
+        Step();
+    }
+    assert(lidar_obs.points > points && comp.obstacles == 1U);
+    for (unsigned i = 0; i < 2000U && chassis.mode != CHASSIS_MODE_PATH; ++i)
+        Step();
+    assert(comp.run_state == COMP_RUN_MOVE && chassis.mode == CHASSIS_MODE_PATH);
+    assert(servo_at == COMP_LIDAR_SERVO_SCAN_DEG);
+    points = lidar_obs.points;
+    Steps(100U);
+    assert(chassis.mode == CHASSIS_MODE_PATH && lidar_obs.points > points);
+    for (unsigned i = 0; i < 40000U && Comp_Running(); ++i)
+        Step();
+    Steps(1U);
+    assert(comp.run_state == COMP_RUN_DONE && comp.lidar_state == COMP_LIDAR_DONE);
+    assert(servo_at == COMP_LIDAR_SERVO_STOW_DEG && servo_calls == 2U);
+
+    Line("/set servo_stow 20");
+    Steps(1U);
+    assert(servo_at == 20.0f);
+    Line("/set servo_scan 120");
+    Line("/scan");
+    Steps(1U);
+    assert(servo_at == 120.0f);
+    WaitScanEnd();
+    assert(comp.lidar_state == COMP_LIDAR_DONE && comp.obstacles == 1U && servo_at == 20.0f);
+    Line("/reset");
+    Steps(1U);
+    assert(servo_at == COMP_LIDAR_SERVO_STOW_DEG);
+}
+
 /* ---------- 开局流程 ---------- */
-/* 车身（270 见方）压到了真实的障碍物（包括雷达看不到的）吗。 */
+/* 雷达没确定收好（伸着或者正在转），它就在车身左后角外面。 */
+static uint8_t LidarOut(void)
+{
+    return servo_at != lidar_tune.servo_stow || ms - servo_since < COMP_LIDAR_SERVO_MS;
+}
+
+/* 车身（270 见方）压到了真实的障碍物（包括雷达看不到的）吗；雷达伸着时，它（C1 外径 55.6）也不能碰
+   障碍物、出场地。 */
 static uint8_t HitsSomething(void)
 {
     for (unsigned i = 0; i < world_count; ++i)
@@ -408,6 +528,16 @@ static uint8_t HitsSomething(void)
         if (hypotf(dx, dy) < 25.0f)
             return 1U;
     }
+    if (!LidarOut())
+        return 0U;
+    const float r = 27.8f, h = comp.heading_deg * MATH_DEG_TO_RAD;
+    float lx = comp.x + cosf(h) * lidar_tune.lidar_x - sinf(h) * lidar_tune.lidar_y;
+    float ly = comp.y + sinf(h) * lidar_tune.lidar_x + cosf(h) * lidar_tune.lidar_y;
+    if (lx < r || ly < r || lx > MAP_WIDTH_MM - r || ly > MAP_HEIGHT_MM - r)
+        return 1U;
+    for (unsigned i = 0; i < world_count; ++i)
+        if (hypotf(world[i][0] - lx, world[i][1] - ly) < 25.0f + r)
+            return 1U;
     return 0U;
 }
 
@@ -421,8 +551,10 @@ static void RunToEnd(void)
     assert(!Comp_Running());
 }
 
-/* 这三个都不挡路：启停区、二维码板前、场地中央各扫一次。 */
-static void TestOpeningScansThreePlaces(void)
+/* 这三个都不挡路。开局先在启停区停着扫完一轮，然后伸着雷达边走边扫：走着的时候雷达接收开着，每拍都在读。
+   换过三个位置、一直没有新目标就收雷达，结果和任务码都只输出一次。启停区 1 车头一直朝 +Y、不用转：往下去
+   板子是后退，朝着左后角的雷达那边，没有看不清的路段。扫完时还在板前，读到码就结束，不去场地中央。 */
+static void TestOpeningScansWhileDriving(void)
 {
     static const float aside[3][2] = {{1200, 1800}, {300, 1000}, {600, 2000}};
     Boot(3U, aside);
@@ -433,29 +565,32 @@ static void TestOpeningScansThreePlaces(void)
     assert(comp.run_state == COMP_RUN_SCAN && chassis.mode == CHASSIS_MODE_VEL);
     assert(strstr(Output(), "RUN scan\r\n"));
 
-    /* 开动时雷达的接收关着，一个字节都不读。 */
-    unsigned moving_reads = ser_reads[SER_LIDAR], moving_ticks = 0U;
+    unsigned moving_ticks = 0U, moving_reads = 0U;
     for (unsigned i = 0; i < 40000U && Comp_Running(); ++i)
     {
+        if (comp.run_state == COMP_RUN_SCAN)
+            assert(chassis.mode == CHASSIS_MODE_VEL); // 第一轮扫完才走
+        unsigned reads = ser_reads[SER_LIDAR];
         uint8_t moving = chassis.mode == CHASSIS_MODE_PATH;
         Step();
-        if (moving && chassis.mode == CHASSIS_MODE_PATH)
+        if (moving && chassis.mode == CHASSIS_MODE_PATH && comp.lidar_state == COMP_LIDAR_RUN)
         {
             ++moving_ticks;
-            assert(ser_reads[SER_LIDAR] == moving_reads && !ser_rx_on[SER_LIDAR]);
+            moving_reads += ser_reads[SER_LIDAR] != reads;
         }
-        moving_reads = ser_reads[SER_LIDAR];
         assert(!HitsSomething());
     }
-    assert(moving_ticks > 200U);
+    assert(moving_ticks > 200U && moving_reads == moving_ticks);
     assert(comp.run_state == COMP_RUN_DONE && CountOutput("RUN done\r\n") == 1U);
-
-    /* 启停区、二维码板前、场地中央各扫一次；结果和任务码都只输出一次。 */
-    assert(CountOutput("RUN scan\r\n") == 3U && CountOutput("COMP scan done: 3 obstacles\r\n") == 1U);
-    assert(CountOutput("COMP obstacle #") == 3U);
+    assert(CountOutput("RUN scan\r\n") == 1U);
+    assert(CountOutput("COMP scan end: stable observations, places=3\r\n") == 1U);
+    assert(CountOutput("COMP scan done: 3 obstacles\r\n") == 1U && CountOutput("COMP obstacle #") == 3U);
+    assert(CountOutput("RUN move blind") == 0U && CountOutput("RUN move\r\n") >= 2U);
+    assert(CountOutput("RUN turn") == 0U);
+    assert(fabsf(Math_WrapDeg(comp.heading_deg - COMP_START_HEADING_DEG(1))) < 1.0f);
     assert(CountOutput("COMP task 156+123+516+231 from scanner") == 1U);
     assert(comp.vision_mode == VISION_OFF);
-    assert(hypotf(comp.x - (float)COMP_CENTER_MM, comp.y - (float)COMP_CENTER_MM) < 4.0f);
+    assert(fabsf(comp.x - (float)COMP_QR_STOP_X_MM) < 4.0f && fabsf(comp.y - board_y) < SCANNER_WINDOW_MM);
 
     /* 雷达和扫码口都关了。 */
     assert(comp.lidar_state == COMP_LIDAR_DONE && !lidar_on && !ser_rx_on[SER_LIDAR]);
@@ -482,7 +617,7 @@ static void TestOpeningScansThreePlaces(void)
     assert(comp.run_state == COMP_RUN_DONE && comp.obstacles == 1U && rightmost > 2100.0f);
 }
 
-/* 中间横着的车道被 (1720,1180) 挡住了：不用为了到场地中央绕一大圈，换个位置扫够三处就结束。 */
+/* 中间横着的车道被 (1720,1180) 挡住了：不用为了到场地中央绕一大圈，边走边扫够了就在板前结束。 */
 static void TestOpeningDoesNotDetourForTheCentre(void)
 {
     Boot(3U, kThree);
@@ -490,7 +625,7 @@ static void TestOpeningDoesNotDetourForTheCentre(void)
     Line("/start");
     RunToEnd();
     assert(comp.run_state == COMP_RUN_DONE && comp.task_valid);
-    assert(CountOutput("RUN scan\r\n") == 3U && CountOutput("COMP scan done: 3 obstacles\r\n") == 1U);
+    assert(CountOutput("RUN scan\r\n") == 1U && CountOutput("COMP scan done: 3 obstacles\r\n") == 1U);
     assert(hypotf(comp.x - (float)COMP_CENTER_MM, comp.y - (float)COMP_CENTER_MM) > 300.0f);
     /* 没走完的路线不留着。 */
     assert(comp.route_state == COMP_ROUTE_NONE);
@@ -499,10 +634,10 @@ static void TestOpeningDoesNotDetourForTheCentre(void)
     assert(strcmp(Output(), "ROUTE none\r\n") == 0);
 }
 
-/* 从启停区 1 看，(300,1200) 完全在 (1200,1700) 后面；后面两个位置能看到。 */
+/* 从启停区 1 的雷达 (2095,2095) 看，(265,1287) 完全在 (1200,1700) 后面；走着的时候换了视角就看到了。 */
 static void TestOpeningFindsHiddenObstacle(void)
 {
-    static const float lined_up[2][2] = {{1200, 1700}, {300, 1200}};
+    static const float lined_up[2][2] = {{1200, 1700}, {265, 1287}};
     Boot(2U, lined_up);
     WaitAnchored();
     Line("/start");
@@ -514,34 +649,71 @@ static void TestOpeningFindsHiddenObstacle(void)
     assert(CountOutput("COMP scan done: 2 obstacles\r\n") == 1U);
 }
 
-/* 右边车道被挡住，路线要拐弯：只走第一段，到拐点停下再扫，能看到躲在第一个后面、正好在第二段路上的
-   障碍物，然后绕开。从启停区看 (2195,1500) 在 (2220,1850) 正后方。 */
-static void TestOpeningStopsAtCornersWhenBlocked(void)
+/* 右边车道被 (2220,1850) 挡住，路线要往左绕：每走完一段在拐点重新规划。绕过去以后往右平移回车道去板子，
+   雷达被车身挡着，这几段报 blind（其实之前看到过，固件只按这一段从哪儿出发、往哪边走来判断，宁可多报）。 */
+static void TestOpeningDetoursWhenBlocked(void)
 {
-    static const float behind[2][2] = {{2220, 1850}, {2195, 1500}};
-    Boot(2U, behind);
+    static const float blocker[1][2] = {{2220, 1850}};
+    Boot(1U, blocker);
     WaitAnchored();
     Line("/start");
-    for (unsigned i = 0; i < 2000U && comp.run_state == COMP_RUN_SCAN; ++i)
-        Step();
-    assert(comp.obstacles == 1U);
     RunToEnd();
-    assert(comp.run_state == COMP_RUN_DONE && comp.obstacles == 2U);
-    assert(CountOutput("RUN scan\r\n") > 3U);
+    assert(comp.run_state == COMP_RUN_DONE && comp.obstacles == 1U && comp.task_valid);
+    assert(CountOutput("RUN scan\r\n") == 1U && CountOutput("RUN move\r\n") > 3U);
+    assert(CountOutput("RUN move blind\r\n") >= 1U);
 }
 
-/* 随机摆放的障碍物，真实固件从头跑到尾：什么情况下都不能撞上，看得到的都要找到。 */
-static void TestOpeningOnRandomLayouts(void)
+/* 走着的时候才看到挡路的障碍物（开局扫的时候它还被挡着，走近了才露出来）：停下来按新地图绕过去，
+   接着跑完，不撞。车速放慢：一轮扫描（约 2 秒）里车走不远。 */
+static void TestOpeningReplansAroundNewObstacle(void)
 {
+    Boot(0U, NULL);
+    Line("/set cmd_speed 100");
+    WaitAnchored();
+    Line("/start");
+    for (unsigned i = 0; i < 4000U && chassis.mode != CHASSIS_MODE_PATH; ++i)
+        Step();
+    assert(comp.run_state == COMP_RUN_MOVE && comp.y > 2200.0f);
+    world[0][0] = 2250.0f;
+    world[0][1] = comp.y - 600.0f; // 第一段路正前方
+    world_count = 1U;
+    RunToEnd();
+    assert(comp.run_state == COMP_RUN_DONE && comp.task_valid && comp.obstacles == 1U);
+    assert(CountOutput("ROUTE stopped blocked\r\n") == 1U);
+}
+
+/* 读不到任务码报失败时：从车停的位置沿着板子走，被障碍物挡着到不了正对板子中心的地方，才说得过去。 */
+static uint8_t BoardWithinReach(void)
+{
+    int32_t x = (int32_t)lroundf(comp.x), y = (int32_t)lroundf(comp.y);
+    int32_t step = board_y > comp.y ? MAP_CELL_MM : -MAP_CELL_MM;
+    for (; fabsf((float)y - board_y) >= SCANNER_WINDOW_MM; y += step)
+    {
+        uint16_t r, c;
+        if (!Map_WorldToGrid(x, y + step, &r, &c) || !Map_CanStand(r, c))
+            return 0U;
+    }
+    return 1U;
+}
+
+typedef struct
+{
+    unsigned runs, placed, missed, done, blocked, unreadable, blind, hits;
+} RandomStats;
+
+/* 随机摆放的障碍物（板子也随机放），从启停区 zone 出发，真实固件从头跑到尾。 */
+static RandomStats RunRandomLayouts(unsigned zone)
+{
+    RandomStats st = {0};
     uint32_t seed = 12345U;
-    unsigned runs = 0U, placed = 0U, missed = 0U, done = 0U;
+    boot_zone = (uint8_t)zone;
     for (unsigned t = 0; t < 24U; ++t)
     {
         float layout[6][2];
         unsigned count = 3U + t % 4U;
         for (unsigned i = 0; i < count; ++i)
         {
-            /* 只放在车道上，别贴着启停区，贴着也走不出来。 */
+            /* 只放在车道上，别贴着两个启停区，贴着也走不出来。 */
             uint8_t ok = 0U;
             while (!ok)
             {
@@ -552,19 +724,47 @@ static void TestOpeningOnRandomLayouts(void)
                 static const float box[6][4] = {{550, 550, 1000, 1000},  {1400, 550, 1850, 1000},
                                                 {550, 1400, 1000, 1850}, {1400, 1400, 1850, 1850},
                                                 {0, 910, 150, 1490},     {910, 0, 1490, 150}};
-                ok = hypotf(layout[i][0] - 2250.0f, layout[i][1] - 2250.0f) > 400.0f;
+                ok = hypotf(layout[i][0] - 2250.0f, layout[i][1] - 2250.0f) > 400.0f &&
+                     hypotf(layout[i][0] - 2250.0f, layout[i][1] - 150.0f) > 400.0f;
                 for (unsigned b = 0; b < 6U; ++b)
                     if (layout[i][0] > box[b][0] - 25.0f && layout[i][0] < box[b][2] + 25.0f &&
                         layout[i][1] > box[b][1] - 25.0f && layout[i][1] < box[b][3] + 25.0f)
                         ok = 0U;
             }
         }
+        board_y = (float)(COMP_QR_Y_MIN_MM + (int)((t * 53U) % 201U));
         Boot(count, layout);
         WaitAnchored();
         Line("/start");
-        RunToEnd();
-        ++runs;
-        done += comp.run_state == COMP_RUN_DONE;
+        uint8_t hit = 0U;
+        for (unsigned i = 0; i < 40000U && Comp_Running(); ++i)
+        {
+            Step();
+            hit = hit || HitsSomething();
+        }
+        assert(!Comp_Running());
+        ++st.runs;
+        /* 雷达看清了的路段一定不撞；看不清的（报 blind）只能碰运气。 */
+        uint8_t went_blind = CountOutput("RUN move blind") > 0U;
+        assert(!hit || went_blind);
+        st.blind += went_blind;
+        st.hits += hit;
+        if (comp.run_state != COMP_RUN_DONE)
+        {
+            /* 没跑完只能是这两种：去二维码板的路堵死了；或者障碍物挡在板子前面，车站不到正对板子的位置。 */
+            if (strstr(Output(), "RUN failed task"))
+            {
+                assert(!BoardWithinReach());
+                ++st.unreadable;
+            }
+            else
+            {
+                assert(strstr(Output(), "RUN failed route"));
+                ++st.blocked;
+            }
+            continue;
+        }
+        ++st.done;
         MapPoint list[MAP_MAX_OBSTACLES];
         unsigned found = LidarObs_List(list, MAP_MAX_OBSTACLES);
         for (unsigned i = 0; i < count; ++i)
@@ -572,14 +772,96 @@ static void TestOpeningOnRandomLayouts(void)
             uint8_t seen = 0U;
             for (unsigned j = 0; j < found; ++j)
                 seen = seen || hypotf((float)list[j].x - layout[i][0], (float)list[j].y - layout[i][1]) < 60.0f;
-            ++placed;
-            missed += !seen;
+            ++st.placed;
+            st.missed += !seen;
         }
     }
-    printf("random openings: %u of %u finished, no collision, %u of %u obstacles missed\n", done, runs,
-           missed, placed);
-    /* 有一组的 6 个障碍物把去二维码板的路全堵死了，这时报失败、不动是对的。 */
-    assert(done == runs - 1U && missed == 0U);
+    board_y = 1200.0f;
+    boot_zone = 1U;
+    printf("random openings from zone %u: %u of %u finished, %u of %u obstacles missed; %u blocked, "
+           "%u board out of reach; %u went blind, %u hit something\n",
+           zone, st.done, st.runs, st.missed, st.placed, st.blocked, st.unreadable, st.blind, st.hits);
+    assert(st.done + st.blocked + st.unreadable == st.runs);
+    return st;
+}
+
+static void TestOpeningOnRandomLayouts(void)
+{
+    /* 启停区 1：去板子是后退，朝着雷达那边。没跑完的几组是障碍物挡在板子前面，假扫码模块只认正对的
+       ±15 mm，车站不过去就读不到，报失败、停下是对的。绕障碍物时有的路段往右或往车头走，报 blind，
+       这几组车身和伸着的雷达都没碰到东西。 */
+    RandomStats one = RunRandomLayouts(1U);
+    assert(one.done >= one.runs - 4U && one.missed == 0U && one.hits == 0U);
+    /* 启停区 2：车头朝 +X 出发，去板子是往左平移，到了板前收起雷达原地转过来再读码。板前障碍物多、
+       找不到转得开的地方时报 RUN failed route。 */
+    RandomStats two = RunRandomLayouts(2U);
+    assert(two.done >= two.runs - 4U && two.missed == 0U && two.hits == 0U);
+}
+
+/* 启停区 2 在板子下面，车头朝 +X 摆：左后角的雷达朝场地里面，往上去板子是往左平移，看得清。
+   扫码模块这时朝下：到了板前原地转到 +Y 才读码，之后一直朝 +Y。转之前停下扫描把雷达收回来（伸着转会
+   碰到板子），转完又伸出去接着扫。 */
+static void TestZoneTwoTurnsAtTheBoard(void)
+{
+    boot_zone = 2U;
+    Boot(0U, NULL);
+    WaitAnchored();
+    assert(fabsf(Math_WrapDeg(comp.heading_deg - COMP_START_HEADING_DEG(2))) < 0.01f);
+    assert(strstr(Output(), "COMP pose anchored at (2250,150) heading 0\r\n"));
+    Line("/start");
+    float turn_x = 0.0f, turn_y = 0.0f;
+    unsigned turning = 0U, spinning = 0U;
+    uint8_t redeployed = 0U;
+    for (unsigned i = 0; i < 40000U && Comp_Running(); ++i)
+    {
+        Step();
+        assert(!HitsSomething());
+        if (comp.run_state == COMP_RUN_TURN)
+        {
+            if (!turning++)
+            {
+                turn_x = comp.x;
+                turn_y = comp.y;
+            }
+            assert(!comp.task_valid && hypotf(comp.x - turn_x, comp.y - turn_y) < 5.0f);
+        }
+        if (chassis.mode == CHASSIS_MODE_TURN)
+        {
+            ++spinning;
+            assert(!LidarOut()); // 收好了才转
+        }
+        else if (spinning && servo_at == COMP_LIDAR_SERVO_SCAN_DEG)
+            redeployed = 1U;
+    }
+    assert(comp.run_state == COMP_RUN_DONE && comp.task_valid);
+    assert(spinning > 50U && redeployed && CountOutput("RUN turn\r\n") == 1U);
+    assert(fabsf(turn_x - (float)COMP_QR_STOP_X_MM) < 4.0f && fabsf(turn_y - (float)COMP_QR_Y_MIN_MM) < 4.0f);
+    assert(CountOutput("RUN move blind") == 0U && CountOutput("RUN scan\r\n") == 1U);
+    assert(fabsf(Math_WrapDeg(comp.heading_deg - COMP_QR_HEADING_DEG)) < 1.0f);
+    assert(hypotf(comp.x - (float)COMP_CENTER_MM, comp.y - (float)COMP_CENTER_MM) < 4.0f);
+    boot_zone = 1U;
+}
+
+/* 启停区 2：(1965,1100) 离 1100 那个停车点 225 mm，站得下但转不开（转的时候车角扫过 191 mm）：
+   往上找到第一个转得开的地方再转。 */
+static void TestZoneTwoTurnsWhereThereIsRoom(void)
+{
+    static const float near_board[1][2] = {{1965, 1100}};
+    boot_zone = 2U;
+    Boot(1U, near_board);
+    WaitAnchored();
+    Line("/start");
+    float turn_y = 0.0f;
+    for (unsigned i = 0; i < 40000U && Comp_Running(); ++i)
+    {
+        Step();
+        assert(!HitsSomething());
+        if (comp.run_state == COMP_RUN_TURN && turn_y == 0.0f)
+            turn_y = comp.y;
+    }
+    assert(comp.run_state == COMP_RUN_DONE && comp.task_valid && comp.obstacles == 1U);
+    assert(turn_y > 1100.0f + 240.0f && CountOutput("RUN turn\r\n") == 1U);
+    boot_zone = 1U;
 }
 
 static void TestRunLocksEverythingButStop(void)
@@ -646,21 +928,101 @@ static void TestRunLocksEverythingButStop(void)
     Line("S");
 }
 
-static void TestRunWithoutTaskCodeStopsAtTheBoard(void)
+static void WaitSweep(void)
+{
+    for (unsigned i = 0; i < 40000U && comp.run_state != COMP_RUN_WAIT; ++i)
+        Step();
+    assert(comp.run_state == COMP_RUN_WAIT);
+}
+
+/* 启停区 1 从上面下来，找码从 1300 开始。板子在 1100，离得最远：到了停车点读不到，沿板慢慢往下找，
+   读到就停下，不用走到头。这时边走边扫已经结束，读到码就收工，不去场地中央。 */
+static void TestBoardSweepFindsTheFarEnd(void)
+{
+    board_y = (float)COMP_QR_Y_MIN_MM;
+    Boot(0U, NULL);
+    WaitAnchored();
+    Line("/start");
+    WaitSweep();
+    assert(hypotf(comp.x - (float)COMP_QR_STOP_X_MM, comp.y - (float)COMP_QR_Y_MAX_MM) < 4.0f);
+    assert(comp.vision_mode == VISION_QR); // 扫码模块没读到，相机也帮着找
+    float fastest = 0.0f, read_y = 0.0f;
+    for (unsigned i = 0; i < 40000U && Comp_Running(); ++i)
+    {
+        uint8_t sweeping = comp.run_state == COMP_RUN_WAIT;
+        Step();
+        assert(!HitsSomething());
+        if (sweeping)
+        {
+            fastest = fmaxf(fastest, robot_speed);
+            assert(fabsf(comp.x - (float)COMP_QR_STOP_X_MM) < 4.0f);
+        }
+        if (comp.task_valid && read_y == 0.0f)
+            read_y = comp.y;
+    }
+    assert(comp.run_state == COMP_RUN_DONE && comp.task_valid);
+    assert(fabsf(read_y - board_y) < SCANNER_WINDOW_MM);
+    assert(fastest > 0.8f * COMP_QR_SWEEP_MM_S && fastest < 1.05f * COMP_QR_SWEEP_MM_S);
+    assert(CountOutput("RUN wait\r\n") == 1U && CountOutput("RUN scan\r\n") == 1U);
+    assert(CountOutput("RUN turn") == 0U); // 启停区 1 一直没转
+    assert(comp.lidar_state == COMP_LIDAR_DONE && fabsf(comp.x - (float)COMP_QR_STOP_X_MM) < 4.0f &&
+           fabsf(comp.y - read_y) < 20.0f);
+    board_y = 1200.0f;
+}
+
+/* 板子正好在启停区 1 找码的起点 1300：一到停车点就读到了，不用沿板找。 */
+static void TestBoardReadAtTheStop(void)
+{
+    board_y = (float)COMP_QR_Y_MAX_MM;
+    Boot(0U, NULL);
+    WaitAnchored();
+    Line("/start");
+    RunToEnd();
+    assert(comp.run_state == COMP_RUN_DONE && comp.task_valid);
+    assert(CountOutput("RUN wait\r\n") == 0U && CountOutput("COMP task 156+123+516+231") == 1U);
+    board_y = 1200.0f;
+}
+
+/* 一直读不到：沿板来回找，不出 1100~1300、不超速，到时间报失败并停下；找的时候 S 也能停。 */
+static void TestRunWithoutTaskCodeSweepsThenStops(void)
 {
     const char *code = scanner_code;
     scanner_code = NULL;
     Boot(0U, NULL);
     WaitAnchored();
     Line("/start");
-    for (unsigned i = 0; i < 40000U && comp.run_state != COMP_RUN_WAIT; ++i)
+    WaitSweep();
+    float top = comp.y, back = 1e9f;
+    unsigned ticks = 0U;
+    for (; ticks < 40000U && Comp_Running(); ++ticks)
+    {
         Step();
-    assert(comp.run_state == COMP_RUN_WAIT);
-    assert(comp.vision_mode == VISION_QR); // 扫码模块没读到，相机也帮着找
-    RunToEnd();
+        assert(fabsf(comp.x - (float)COMP_QR_STOP_X_MM) < 4.0f);
+        assert(comp.y > COMP_QR_Y_MIN_MM - 4.0f && comp.y < COMP_QR_Y_MAX_MM + 4.0f);
+        assert(robot_speed < 1.05f * COMP_QR_SWEEP_MM_S);
+        top = fmaxf(top, comp.y);
+        if (top > COMP_QR_Y_MAX_MM - 4.0f)
+            back = fminf(back, comp.y);
+    }
     assert(comp.run_state == COMP_RUN_FAILED && CountOutput("RUN failed task\r\n") == 1U);
-    assert(hypotf(comp.x - (float)COMP_QR_STOP_X_MM, comp.y - (float)COMP_QR_STOP_Y_MM) < 4.0f);
-    /* 等的时候手动输入也算。 */
+    assert(ticks * 5U >= COMP_QR_TIMEOUT_MS && ticks * 5U <= COMP_QR_TIMEOUT_MS + 20U);
+    assert(back < COMP_QR_Y_MIN_MM + 4.0f); // 从 1300 往下走到 1100 掉头，来回找
+    assert(chassis.mode == CHASSIS_MODE_VEL && comp.route_state == COMP_ROUTE_NONE);
+    float y = comp.y;
+    Steps(400U);
+    assert(fabsf(comp.y - y) < 0.5f);
+
+    Line("/start");
+    WaitSweep();
+    Steps(200U);
+    assert(chassis.mode == CHASSIS_MODE_PATH);
+    Line("S");
+    assert(comp.run_state == COMP_RUN_STOPPED && chassis.mode == CHASSIS_MODE_VEL);
+    y = comp.y;
+    Steps(400U);
+    assert(fabsf(comp.y - y) < 0.5f && comp.run_state == COMP_RUN_STOPPED);
+
+    /* 扫码模块好了，重新开始就能跑完。 */
     Line("/start");
     for (unsigned i = 0; i < 40000U && comp.run_state != COMP_RUN_SCAN; ++i)
         Step();
@@ -695,17 +1057,17 @@ static void TestRunWithoutLidar(void)
     Line("/start");
     RunToEnd();
     assert(comp.run_state == COMP_RUN_DONE && comp.lidar_state == COMP_LIDAR_FAILED);
-    /* 雷达坏了，换位置也没用，到二维码板前读完码就结束。 */
-    assert(hypotf(comp.x - (float)COMP_QR_STOP_X_MM, comp.y - (float)COMP_QR_STOP_Y_MM) < 4.0f);
+    /* 雷达坏了，换位置也没用，沿板读到码就结束。一路都没看清，都报 blind。 */
+    assert(fabsf(comp.x - (float)COMP_QR_STOP_X_MM) < 4.0f && fabsf(comp.y - board_y) < SCANNER_WINDOW_MM);
     assert(CountOutput("COMP scan failed: no lidar data\r\n") == 1U && CountOutput("RUN scan\r\n") == 1U);
-    assert(!strstr(Output(), "COMP scan done"));
+    assert(!strstr(Output(), "COMP scan done") && CountOutput("RUN move\r\n") == 0U);
     lidar_connected = 1U;
 }
 
-/* 二维码板前被障碍物占了：在板子前面换个位置；场地中央被占了：不去了。 */
+/* 找码的起点 1100 被障碍物挡了：从找码范围里能站的地方开始找；场地中央被占了：不去了。 */
 static void TestRunAdaptsToBlockedStops(void)
 {
-    static const float on_stops[2][2] = {{2205, 1100}, {1205, 1205}};
+    static const float on_stops[2][2] = {{2205, 1000}, {1205, 1205}};
     Boot(2U, on_stops);
     WaitAnchored();
     Line("/start");
@@ -850,7 +1212,8 @@ static void TestLargeCrossTrackStops(void)
     Line("/route go");
     Steps(100U);
     assert(comp.route_state == COMP_ROUTE_FOLLOWING);
-    chassis.pos_x += 50.0f;
+    chassis.pos_x += 50.0f; // 两个方向都跳：不管这段沿哪个轴走，都有 50 mm 横偏
+    chassis.pos_y += 50.0f;
     ClearOutput();
     Steps(5U);
     assert(comp.route_state == COMP_ROUTE_STOPPED && CountOutput("ROUTE stopped cross\r\n") == 1U);
@@ -1180,13 +1543,19 @@ int main(void)
     TestScanGivesUpWithoutLidar();
     TestRescanIsExplicit();
     TestPoseDuringScanRestartsIt();
-    TestOpeningScansThreePlaces();
+    TestLidarServoMovesAroundScans();
+    TestOpeningScansWhileDriving();
     TestOpeningDoesNotDetourForTheCentre();
     TestOpeningFindsHiddenObstacle();
-    TestOpeningStopsAtCornersWhenBlocked();
+    TestOpeningDetoursWhenBlocked();
+    TestOpeningReplansAroundNewObstacle();
     TestOpeningOnRandomLayouts();
+    TestZoneTwoTurnsAtTheBoard();
+    TestZoneTwoTurnsWhereThereIsRoom();
     TestRunLocksEverythingButStop();
-    TestRunWithoutTaskCodeStopsAtTheBoard();
+    TestBoardSweepFindsTheFarEnd();
+    TestBoardReadAtTheStop();
+    TestRunWithoutTaskCodeSweepsThenStops();
     TestRunEndsOnChassisFault();
     TestRunWithoutLidar();
     TestRunAdaptsToBlockedStops();
