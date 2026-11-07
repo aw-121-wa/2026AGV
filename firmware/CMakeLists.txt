@@ -51,6 +51,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User/Comm/chassis_cmd.c
     User/Comm/chassis_telemetry.c
     User/Comm/console.c
+    User/Comm/tune_log.c
     User/Comm/uart_callbacks.c
     User/Navigation/map.c
     User/Navigation/astar.c

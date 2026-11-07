@@ -26,6 +26,9 @@ void ChassisTelemetry_Printf(const char *format, ...) __attribute__((format(prin
 /* 追加一段固定文本，不走 Printf 的单次长度上限；只能在底盘任务里调用。 */
 void ChassisTelemetry_Puts(const char *text);
 
+/* 发送缓冲还空着一半以上。分批发长文本的（路线、调参日志）没空就等，给状态行和回执留位置。 */
+uint8_t ChassisTelemetry_HasRoom(void);
+
 /* 周期状态行频率：0 = 关闭，1..10 Hz。 */
 void ChassisTelemetry_SetRate(unsigned hz);
 

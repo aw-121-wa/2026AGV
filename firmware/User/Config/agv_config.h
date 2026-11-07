@@ -65,7 +65,7 @@
 #define AGV_SEARCH_BUDGET  32U // 每拍 A* 最多扩展的节点数
 #define AGV_CORRIDOR_CELLS 15U // 单段规划走廊半宽（栅格）
 
-/* 大数组（A* 的 cost/heap/position、地图构型空间位图）放 .agv_ram：链接脚本把它单独
+/* 大数组（A* 的 cost/heap/position、地图构型空间位图、调参日志）放 .agv_ram：链接脚本把它单独
    放进 512 KB 的 RAM 段，避免撑爆只有 128 KB 的 DTCM；主机测试里该宏展开为空。 */
 #if defined(__arm__) || defined(__thumb__)
 #define AGV_RAM __attribute__((section(".agv_ram"), aligned(4)))

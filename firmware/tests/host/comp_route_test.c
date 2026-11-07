@@ -889,7 +889,7 @@ static void TestRunLocksEverythingButStop(void)
     assert(chassis_tune.heading_kp == kp && !comp.task_valid);
 
     /* 只看不改的可以。 */
-    static const char *const allowed[] = {"/list heading_kp", "/obs", "/task", "/route", "/run", "/mode", "I", "D1"};
+    static const char *const allowed[] = {"/list heading_kp", "/obs", "/task", "/route", "/run", "/mode", "/log off", "I", "D1"};
     for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); ++i)
     {
         ClearOutput();

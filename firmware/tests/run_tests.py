@@ -34,11 +34,22 @@ SUITES = {
 }
 
 
-def run(name, sources, defines=()):
+def run(name, sources, defines=(), args=()):
     exe = BUILD / name
     subprocess.run(CFLAGS + list(defines) + ['tests/host/' + name.split('@')[0] + '.c'] + sources +
                    ['-lm', '-o', str(exe)], cwd=ROOT, check=True)
-    subprocess.run([str(exe)], cwd=ROOT, check=True, timeout=60)
+    subprocess.run([str(exe)] + list(args), cwd=ROOT, check=True, timeout=60)
+
+
+def node_tests(fixture):
+    """调试台的调参算法（tools/pid_tune.js）：用 tune_log_test 记下的假车日志检查。"""
+    try:
+        subprocess.run(['node', '--version'], capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        print('SKIP tools/pid_tune_test.js: node not found')
+        return
+    subprocess.run(['node', str(ROOT.parent / 'tools' / 'pid_tune_test.js'), str(fixture)],
+                   cwd=ROOT, check=True, timeout=300)
 
 
 def main():
@@ -48,11 +59,14 @@ def main():
     run('bench_test@imu', [])
     run('bench_test@noimu', [], ['-DCHASSIS_USE_IMU=0'])
     run('console_test@noimu', [], ['-DCHASSIS_USE_IMU=0'])
+    fixture = BUILD / 'tune_fixture.log'
+    run('tune_log_test', [], args=[str(fixture)])
+    node_tests(fixture)
     for mode in range(3):
         run('mode_test@' + str(mode), [], ['-DAGV_MODE=' + str(mode)])
     run('survey_loop_test', NAV + ['User/App/agv_run.c'], ['-DAGV_MODE=1'])
     run('comp_task_test', ['User/App/competition.c', 'User/App/task_code.c',
-                           'User/Comm/console.c',
+                           'User/Comm/console.c', 'User/Comm/tune_log.c',
                            'User/Navigation/map.c', 'User/Navigation/astar.c',
                            'User/Navigation/lidar_obstacle.c',
                            'User/Drivers/RPLidar/rplidar.c', 'User/Comm/vision_link.c'],

@@ -245,9 +245,14 @@ void ChassisTelemetry_SendRoute(unsigned count, telemetry_route_point point)
     route_line = 0U;
 }
 
+uint8_t ChassisTelemetry_HasRoom(void)
+{
+    return TxFree() >= TX_RING_SIZE / 2U;
+}
+
 static void SendRouteLine(uint32_t now)
 {
-    if (!route_point || now == route_ms || TxFree() < TX_RING_SIZE / 2U)
+    if (!route_point || now == route_ms || !ChassisTelemetry_HasRoom())
         return;
     route_ms = now;
     if (route_line == 0U)

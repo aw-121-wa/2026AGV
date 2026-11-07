@@ -32,6 +32,7 @@
 #include "chassis_cmd.h"
 #include "agv_run.h"
 #include "competition.h"
+#include "tune_log.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -183,6 +184,8 @@ void StartChassisTask(void *argument)
 
   for (;;) {
     Chassis_Update();
+
+    TuneLog_Tick();
 
     ChassisCmd_Poll();
 

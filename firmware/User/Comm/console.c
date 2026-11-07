@@ -2,6 +2,7 @@
 #include "agv_config.h"
 #include "chassis.h"
 #include "chassis_telemetry.h"
+#include "tune_log.h"
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
@@ -107,6 +108,7 @@ static void CmdHelp(void)
     ChassisTelemetry_Puts("---- console: lines starting with / ----\r\n"
                           "  /list [prefix]  /set <name> <value>  /reset (all, while stopped)\r\n"
                           "  /plot <heading|speed|wheels> [1..100 Hz]  /plot off  /mode\r\n"
+                          "  /log [on|off]  heading-loop log: last motion, or after every one\r\n"
 #if AGV_MODE == AGV_MODE_COMPETITION
                           "  /start  /run  /task [<code>|clear]  /vision <mode 0..3> [color 0..6]\r\n"
                           "  /obs  /scan  /pose <x> <y> <heading>  /route [<x> <y>|go]\r\n"
@@ -205,6 +207,26 @@ static void CmdPlot(const char *name, const char *hz_text)
                                 columns[group]);
 }
 
+/* 调参日志：/log 发最近一段，/log on|off 每段记完自动发（格式见 tune_log.h）。 */
+static void CmdLog(const char *arg)
+{
+    if (!arg)
+    {
+        HAL_StatusTypeDef status = TuneLog_Send(); // 开始发了就不另外回复，日志本身就是回复
+        if (status == HAL_ERROR)
+            ChassisTelemetry_Printf("LOG none\r\n");
+        else if (status == HAL_BUSY)
+            ChassisTelemetry_Printf("OK   log after this motion\r\n");
+    }
+    else if (strcmp(arg, "on") == 0 || strcmp(arg, "off") == 0)
+    {
+        TuneLog_SetAuto(arg[1] == 'n');
+        ChassisTelemetry_Printf("OK   log auto %s\r\n", arg);
+    }
+    else
+        ChassisTelemetry_Printf("ERR  usage: /log [on|off]\r\n");
+}
+
 #if AGV_MODE == AGV_MODE_COMPETITION
 static void CmdVision(const char *mode_text, const char *color_text)
 {
@@ -265,7 +287,7 @@ static uint8_t RunLocked(const char *cmd, unsigned argc)
 {
     if (!Comp_Running())
         return 0;
-    static const char *const allowed[] = {"help", "list", "mode", "plot", "obs", "run"};
+    static const char *const allowed[] = {"help", "list", "mode", "plot", "log", "obs", "run"};
     for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); ++i)
         if (strcmp(cmd, allowed[i]) == 0)
             return 0;
@@ -357,6 +379,8 @@ void Console_Line(char *line)
         CmdReset();
     else if (strcmp(cmd, "plot") == 0 && (argc == 2U || argc == 3U))
         CmdPlot(argv[1], argc == 3U ? argv[2] : NULL);
+    else if (strcmp(cmd, "log") == 0 && argc <= 2U)
+        CmdLog(argc == 2U ? argv[1] : NULL);
     else if (strcmp(cmd, "mode") == 0 && argc == 1U)
         ChassisTelemetry_Printf("OK   mode %s\r\n", AGV_MODE_NAME);
 #if AGV_MODE == AGV_MODE_COMPETITION

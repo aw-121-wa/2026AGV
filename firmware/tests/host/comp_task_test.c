@@ -85,6 +85,11 @@ uint8_t ChassisTelemetry_Periodic(void)
     return periodic_on;
 }
 
+uint8_t ChassisTelemetry_HasRoom(void)
+{
+    return 1U;
+}
+
 static uint32_t tick = 1000U;
 uint32_t HAL_GetTick(void)
 {

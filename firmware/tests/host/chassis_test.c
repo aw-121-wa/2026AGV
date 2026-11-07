@@ -178,6 +178,7 @@ uint32_t HAL_UARTEx_GetRxEventType(UART_HandleTypeDef *u)
 #include "../../User/Comm/chassis_telemetry.c"
 #include "../../User/Comm/chassis_cmd.c"
 #include "../../User/Comm/console.c"
+#include "../../User/Comm/tune_log.c"
 void HWT101_RxEvent(UART_HandleTypeDef *u, uint16_t n)
 {
     (void)u;
@@ -209,6 +210,7 @@ static void tick(int fresh)
     if (fresh)
         feedback();
     Chassis_Update();
+    TuneLog_Tick(); // 和固件的底盘任务同一个顺序
 }
 static void plant(void)
 {

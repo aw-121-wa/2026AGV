@@ -6,7 +6,8 @@
 <title>2026AGV 调试台</title>
 <!--
   车载固件的调试界面：用 Chrome 或 Edge 直接打开这个文件，通过 USB 转串口连 STM32 的 USART6（115200）。
-  不联网、不依赖任何库。所有数据都来自固件的文本输出（README 4.4 节），解析规则集中在 parseLine，
+  不联网、不依赖任何库；“自动调参”的算法在同一个文件夹的 pid_tune.js。所有数据都来自固件的文本输出
+  （README 4.4 节），解析规则集中在 parseLine（调参日志由 pid_tune.js 的 createParser 解析），
   文本格式由 firmware/tests/host/console_test.c、comp_task_test.c、comp_route_test.c 和
   survey_loop_test.c 逐字固定。
   参数列表来自固件的 /list：固件里加参数不用改这里，只是没有中文说明时显示英文名，放在“其他”组。
@@ -149,10 +150,10 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #plotWrap { position: relative; flex: 1; min-height: 140px; margin: 0 10px 10px; }
 #plot { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
 #plotEmpty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-3); pointer-events: none; text-align: center; padding: 0 20px; }
-#tip { position: absolute; display: none; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; box-shadow: 0 2px 10px rgba(0,0,0,.18); font-size: 12px; z-index: 2; min-width: 130px; }
-#tip div { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
-#tip i { width: 12px; height: 2px; border-radius: 2px; }
-#tip b { font-family: ui-monospace, Consolas, monospace; margin-left: auto; padding-left: 10px; }
+#tip, #tuneTip { position: absolute; display: none; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; box-shadow: 0 2px 10px rgba(0,0,0,.18); font-size: 12px; z-index: 2; min-width: 130px; }
+#tip div, #tuneTip div { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+#tip i, #tuneTip i { width: 12px; height: 2px; border-radius: 2px; }
+#tip b, #tuneTip b { font-family: ui-monospace, Consolas, monospace; margin-left: auto; padding-left: 10px; }
 
 /* 终端 */
 #logPanel { flex: 2; min-height: 180px; }
@@ -226,9 +227,34 @@ body[data-mode=SURVEY] #map { cursor: default; }
 #mapHover { min-width: 104px; text-align: right; }
 #obsList { margin-top: 4px; }
 
+/* 调参 */
+#wsTune { grid-template-columns: 330px minmax(0, 1fr) 360px; }
+#tuneLogPanel { flex: 1; min-height: 160px; }
+#tuneLogs { flex: 1; overflow-y: auto; padding: 0 10px 10px; }
+.tlog { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 8px; align-items: start; padding: 5px 6px; border-top: 1px solid var(--line); cursor: pointer; border-radius: 4px; }
+.tlog:hover { background: var(--panel-2); }
+.tlog.sel { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+.tlog input { margin: 3px 0 0; }
+.tlog .meta { color: var(--text-3); font-size: 11px; }
+.tlog .bad-end { color: var(--warn); }
+.bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+#tuneChartPanel { flex: 1; min-height: 340px; }
+#tuneLegend { padding: 0 10px 6px; min-height: 22px; }
+#tuneLegend i { width: 14px; height: 2px; border-radius: 2px; }
+#tuneLegend i.dash { background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px) !important; height: 2px; }
+#tuneChartWrap { position: relative; flex: 1; min-height: 260px; margin: 0 10px 10px; }
+#tuneChart { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+#tuneChartEmpty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-3); pointer-events: none; text-align: center; padding: 0 20px; }
+.tune-table td.better { color: var(--ok); font-weight: 600; }
+.tune-table td.worse { color: var(--danger); font-weight: 600; }
+.tune-table td.changed { font-weight: 600; }
+pre.macro { margin: 8px 0 0; padding: 6px 8px; background: var(--panel-2); border-radius: 6px; font-size: 12px; overflow-x: auto; }
+
 @media (max-width: 1100px) {
   html, body { height: auto; }
-  #wsDebug, #wsTask, #wsMap { grid-template-columns: minmax(0, 1fr); }
+  #wsDebug, #wsTask, #wsMap, #wsTune { grid-template-columns: minmax(0, 1fr); }
+  #tuneLogs { max-height: 50vh; }
   #paramBody { max-height: 50vh; }
   #plotPanel { min-height: 420px; }
   #log { min-height: 200px; max-height: 40vh; }
@@ -257,6 +283,7 @@ body[data-mode=SURVEY] #map { cursor: default; }
   <button role="tab" data-ws="debug" aria-selected="true">调试台</button>
   <button role="tab" data-ws="task" aria-selected="false">任务物料</button>
   <button role="tab" data-ws="map" aria-selected="false">地图路径</button>
+  <button role="tab" data-ws="tune" aria-selected="false">自动调参</button>
   <span id="tabHint" class="muted small"></span>
 </nav>
 <div id="notice" role="status"></div>
@@ -311,6 +338,7 @@ body[data-mode=SURVEY] #map { cursor: default; }
           <span class="spacer" style="flex:1"></span>
           <label class="check"><input id="showStatus" type="checkbox">状态行</label>
           <label class="check"><input id="showPlot" type="checkbox">曲线数据</label>
+          <label class="check"><input id="showTuneLog" type="checkbox">调参日志</label>
           <button id="clearLog">清屏</button>
         </h2>
         <div id="log" role="log"></div>
@@ -553,8 +581,97 @@ body[data-mode=SURVEY] #map { cursor: default; }
       </section>
     </div>
   </div>
+
+  <!-- 三个模式都有：航向环自动调参，算法在 pid_tune.js（和这个文件放一起） -->
+  <div id="wsTune" class="workspace">
+    <div class="column">
+      <section class="panel">
+        <h2>自动测试</h2>
+        <div class="body">
+          <p class="muted small" style="margin:0 0 6px">车放在地上（轮子离地测不了：车身不转，陀螺仪看不到），周围空出 40 cm。依次原地转 ±5°、±20°、±90°，勾上平移再前后左右各走 300 mm，最后回到原处。每个动作的日志存在这台电脑上。按 Esc 急停。</p>
+          <label class="check"><input id="tuneMoves" type="checkbox" checked>加平移（前后左右各 300 mm）</label>
+          <div class="inline" style="margin-top:6px">
+            <button id="tuneStart" class="primary">开始测试</button>
+            <button id="tuneAbort" disabled>停止</button>
+          </div>
+          <div class="bar" style="margin-top:8px"><i id="tuneBar"></i></div>
+          <p id="tuneState" class="muted small" style="margin:4px 0 0">--</p>
+          <label class="check" style="margin-top:6px" title="发 /log on：手动开、跑路线、比赛流程的每个动作做完都发日志过来"><input id="tuneAuto" type="checkbox">平时每个动作也存日志</label>
+        </div>
+      </section>
+      <section id="tuneLogPanel" class="panel">
+        <h2>日志 <span id="tuneCount" class="muted small"></span>
+          <span class="spacer" style="flex:1"></span>
+          <button id="tuneSelectAll">全选</button>
+          <button id="tuneExport">导出</button>
+          <button id="tuneImport">导入</button>
+          <button id="tuneDelete" title="删除勾选的日志">删除</button>
+          <input id="tuneImportFile" type="file" accept=".json,application/json" hidden>
+        </h2>
+        <div id="tuneLogs"><p class="muted small">还没有日志。跑一次自动测试，或者勾上“平时每个动作也存日志”。</p></div>
+      </section>
+    </div>
+
+    <div class="column">
+      <section id="tuneChartPanel" class="panel">
+        <h2>日志曲线 <span id="tuneChartTitle" class="muted small"></span></h2>
+        <div id="tuneLegend" class="legend"></div>
+        <div id="tuneChartWrap">
+          <canvas id="tuneChart" aria-label="调参日志曲线"></canvas>
+          <div id="tuneChartEmpty">点左边一段日志看曲线；训练以后叠上模型算出来的，对得上才说明模型可信</div>
+          <div id="tuneTip"></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="column scroll-column">
+      <section class="panel">
+        <h2>车的模型
+          <span class="spacer" style="flex:1"></span>
+          <button id="tuneTrain" class="primary">用勾选的日志训练</button>
+        </h2>
+        <div class="body">
+          <div class="bar"><i id="tuneTrainBar"></i></div>
+          <div class="kv" style="margin-top:8px">
+            <div title="下发 1°/s 车实际转多少，小于 1 是麦轮打滑"><span>转向增益 K</span><b id="mK">--</b></div>
+            <div title="驱动器、电机和车身惯量合起来的一阶时间常数"><span>惯性 ms</span><b id="mTau">--</b></div>
+            <div title="CAN、驱动器、陀螺仪加起来的纯延迟"><span>延迟 ms</span><b id="mDelay">--</b></div>
+            <div title="前后平移时车身被带着转的角速度"><span>前后平移扰动</span><b id="mCx">--</b></div>
+            <div title="左右平移时车身被带着转的角速度"><span>左右平移扰动</span><b id="mCy">--</b></div>
+            <div title="模型算的航向和实测差多少（均方根）"><span>拟合误差 °</span><b id="mRms">--</b></div>
+          </div>
+          <p class="muted small" style="margin:6px 0 0">扰动是每 100 mm/s 车速带出来的 °/s。</p>
+          <div id="tuneWarn" class="alarm"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>推荐参数</h2>
+        <div class="body">
+          <p id="tuneSummary" class="muted small" style="margin:0">训练以后在这里出推荐值。</p>
+          <table id="tuneGains" class="num tune-table" aria-label="航向环参数"><tbody></tbody></table>
+          <table id="tunePredict" class="num tune-table" aria-label="模型预测"><tbody></tbody></table>
+          <p id="tuneMargin" class="muted small" style="margin:6px 0 0"></p>
+          <div class="inline" style="margin-top:8px">
+            <button id="tuneApply" class="primary" disabled title="发 /set；固件断电就恢复默认，定稿后把下面的宏写回 chassis.h">用到车上</button>
+            <button id="tuneVerify" disabled title="用新参数再跑一遍自动测试，看实测和预测对不对得上">再跑一遍验证</button>
+          </div>
+          <pre id="tuneMacro" class="macro" hidden></pre>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>验证：预测和实测</h2>
+        <div class="body">
+          <table id="tuneVerifyTable" class="num tune-table" aria-label="预测和实测"><tbody></tbody></table>
+          <p id="tuneVerifyNote" class="muted small" style="margin:6px 0 0">应用推荐值后点“再跑一遍验证”。</p>
+        </div>
+      </section>
+    </div>
+  </div>
 </main>
 
+<script src="pid_tune.js"></script>
 <script>
 'use strict';
 
@@ -676,6 +793,7 @@ async function connect() {
   send('D5');
   send('/mode');
   send('/list');
+  if ($('tuneAuto').checked) send('/log on');
   setTimeout(() => {
     if (app.port === port && !app.lastRx)
       showNotice('连上了串口但没收到任何数据：检查接线（TX/RX 交叉、共地）、板子是否上电、波特率是否是 115200。');
@@ -715,6 +833,7 @@ async function disconnect(reason) {
   if (!port) return;
   if (!reason) { send('/plot off'); send('D1'); await app.chain; }
   app.port = null;
+  stopTuneTest('串口断开了');
   try { await app.reader?.cancel(); } catch { /* 已经断了 */ }
   try { await port.close(); } catch { /* 已经断了 */ }
   setConnected(false);
@@ -761,6 +880,12 @@ function handleLine(raw) {
   app.lastRx = performance.now();
   if (line.includes('�') && ++app.sawGarbage === 5)
     showNotice('收到的全是乱码，多半是波特率不对。固件默认 115200。');
+  for (const w of [...lineWaiters]) if (w.re.test(line)) w.done(line);
+  if (line.startsWith('L ') || line.startsWith('LOG ')) { // 调参日志：样本行默认不进终端
+    onTuneLine(line);
+    if (!line.startsWith('L ') || $('showTuneLog').checked) logLine(line, 'note');
+    return;
+  }
   const { kind, m } = parseLine(line);
   switch (kind) {
     case 'plot': onPlotSample(m[1]); if ($('showPlot').checked) logLine(line, 'note'); return;
@@ -816,6 +941,9 @@ function onBoot(mode) {
   send('D5');
   send('/list');
   if (plot.group) send(`/plot ${plot.group} ${plot.hz}`);
+  tune.parser?.reset();
+  stopTuneTest('固件重启了');
+  if ($('tuneAuto').checked) send('/log on');
 }
 
 /* 这一局的数据：连接或固件重启时清掉，断开时留着看。 */
@@ -834,7 +962,7 @@ function resetParams() {
 
 const MODE_NAMES = { COMMAND: '指令', SURVEY: '巡检', COMPETITION: '比赛' };
 /* 每个模式能用的工作区：调试台三个模式共用。没连接时都能打开看。 */
-const WORKSPACES = { '': ['debug', 'task', 'map'], COMMAND: ['debug'], SURVEY: ['debug', 'map'], COMPETITION: ['debug', 'task', 'map'] };
+const WORKSPACES = { '': ['debug', 'task', 'map', 'tune'], COMMAND: ['debug', 'tune'], SURVEY: ['debug', 'map', 'tune'], COMPETITION: ['debug', 'task', 'map', 'tune'] };
 const TAB_HINTS = {
   '': '没连接：三个工作区都能打开看，连上后按固件的模式显示',
   COMMAND: '指令模式只用调试台；任务物料和地图路径要烧比赛模式固件（AGV_MODE=2）',
@@ -844,11 +972,12 @@ const TAB_HINTS = {
 
 function showWorkspace(name) {
   app.workspace = name;
-  for (const [ws, id] of [['debug', 'wsDebug'], ['task', 'wsTask'], ['map', 'wsMap']])
+  for (const [ws, id] of [['debug', 'wsDebug'], ['task', 'wsTask'], ['map', 'wsMap'], ['tune', 'wsTune']])
     $(id).classList.toggle('active', ws === name);
   document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.ws === name)));
   plot.dirty = true;
   drawMap();
+  drawTuneChart();
 }
 
 function updateModePill() {
@@ -884,6 +1013,7 @@ function updateLocks() {
   $('taskSubmit').disabled = app.running;
   $('visionColor').disabled = !app.port || app.running;
   updateParamEnabled();
+  updateTuneButtons();
 }
 
 const RUN_STATES = { idle: '等启动', scan: '停车扫描', plan: '规划路线', move: '开往下一处', turn: '板前转向', wait: '沿板找码', done: '开局完成', stopped: '已停止', failed: '失败' };
@@ -1798,6 +1928,541 @@ function drawMap() {
   }
 }
 
+/* ---------- 自动调参：算法在 pid_tune.js，日志格式见 firmware/User/Comm/tune_log.h ---------- */
+const TUNE_TURNS = ['T5', 'T-5', 'T20', 'T-20', 'T90', 'T-90'];
+const TUNE_MOVES = ['F300', 'B300', 'L300', 'R300'];
+const TUNE_AUTO_KEY = 'agv-console.tune.auto';
+const TUNE_ARRAYS = { motion: Uint8Array, moving: Uint8Array, target: Float64Array, yaw: Float64Array, pid: Float64Array, cmd: Float64Array, vx: Float64Array, vy: Float64Array };
+const TUNE_PARAMS = ['heading_kp', 'heading_ki', 'heading_i_max', 'heading_i_zone', 'turn_max_speed', 'acc_angular', 'heading_tol', 'acc_linear', 'chassis_k', 'wheel_dia'];
+const tune = { parser: window.PidTune ? PidTune.createParser() : null, logs: [], selected: 0, model: null, result: null, baseFrom: '', test: null, waiter: null, db: null, busy: false, hover: null, chart: null, nextId: Date.now() };
+const lineWaiters = [];
+
+/* 等一行符合 re 的输出，超时或测试被打断时返回 null。 */
+function waitLine(re, ms) {
+  return new Promise(resolve => {
+    const w = { re };
+    w.done = line => { clearTimeout(w.timer); lineWaiters.splice(lineWaiters.indexOf(w), 1); resolve(line); };
+    w.timer = setTimeout(() => w.done(null), ms);
+    lineWaiters.push(w);
+  });
+}
+
+/* 等下一段日志（或作废、缺行）。 */
+function waitTuneEvent(ms) {
+  return new Promise(resolve => {
+    const finish = r => { clearTimeout(timer); if (tune.waiter === finish) tune.waiter = null; resolve(r); };
+    const timer = setTimeout(() => finish(null), ms);
+    tune.waiter = finish;
+  });
+}
+
+function onTuneLine(line) {
+  if (!tune.parser) return;
+  const r = tune.parser.feed(line);
+  if (!r) return;
+  if (r.kind === 'record') addTuneLog(r.record);
+  else if (r.kind === 'broken') setTuneState('收到的一段日志缺了行（串口丢字？），这段没存。');
+  else if (r.kind === 'none') setTuneState('固件里还没有日志：先让车动一下。');
+  tune.waiter?.(r);
+}
+
+function setTuneState(text) { setText('tuneState', text); }
+
+function describeLog(rec, metrics) {
+  if (metrics.length !== 1) return metrics.length ? `${metrics.length} 个动作` : '没有动作';
+  const m = metrics[0];
+  if (m.kind === 'turn') return `转 ${m.step >= 0 ? '+' : ''}${m.step.toFixed(1)}°`;
+  let sx = 0, sy = 0;
+  for (let k = 0; k < rec.n; ++k) { sx += rec.vx[k] * PidTune.DT; sy += rec.vy[k] * PidTune.DT; }
+  const dir = Math.abs(sx) >= Math.abs(sy) ? (sx >= 0 ? '前' : '后') : (sy >= 0 ? '左' : '右');
+  return `平移 ${dir} ${Math.round(Math.hypot(sx, sy))} mm`;
+}
+
+function metricText(m) {
+  const settle = Number.isFinite(m.settle) ? `到位 ${m.settle.toFixed(2)} s` : '没稳住';
+  return m.kind === 'turn' ? `${settle} · 超调 ${m.overshoot.toFixed(2)}°` : `航向最大差 ${m.peakMove.toFixed(2)}° · ${settle}`;
+}
+
+function addTuneLog(rec) {
+  const metrics = PidTune.recordMetrics(rec), test = tune.test;
+  const what = describeLog(rec, metrics);
+  Object.assign(rec, {
+    id: tune.nextId++, savedAt: Date.now(), metrics, use: true, test: test ? test.id : 0,
+    label: test ? `${test.kind === 'verify' ? '验证 ' : ''}${test.current} · ${what}` : what,
+  });
+  tune.logs.push(rec);
+  test?.records.push(rec);
+  tune.selected = rec.id;
+  dbPut(rec);
+  renderTuneLogs();
+  drawTuneChart();
+  updateTuneButtons();
+}
+
+function renderTuneLogs() {
+  const box = $('tuneLogs');
+  setText('tuneCount', tune.logs.length ? `勾选 ${tune.logs.filter(l => l.use).length} / ${tune.logs.length}` : '');
+  if (!tune.logs.length) {
+    box.replaceChildren(el('p', 'muted small', '还没有日志。跑一次自动测试，或者勾上“平时每个动作也存日志”。'));
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const rec of [...tune.logs].reverse()) {
+    const row = el('div', 'tlog' + (rec.id === tune.selected ? ' sel' : ''));
+    const check = el('input');
+    check.type = 'checkbox';
+    check.checked = rec.use;
+    check.title = '勾上的用来训练';
+    check.addEventListener('click', e => {
+      e.stopPropagation();
+      rec.use = check.checked;
+      dbPut(rec);
+      renderTuneLogs();
+      updateTuneButtons();
+    });
+    const head = el('div', '', rec.label + ' ');
+    head.append(el('span', 'muted small', `kp ${rec.params.heading_kp} · ki ${rec.params.heading_ki}`));
+    const end = rec.end === 'done' ? '' : rec.end === 'fault' ? ' · 底盘故障' : ' · 被停下';
+    const time = new Date(rec.savedAt).toLocaleTimeString('zh-CN', { hour12: false });
+    const meta = el('div', 'meta' + (end ? ' bad-end' : ''),
+      `${time} · ${(rec.n * PidTune.DT).toFixed(1)} s${rec.trunc ? '（只留了前 10 s）' : ''}${end} · ${rec.metrics.map(metricText).join('；')}`);
+    const info = el('div');
+    info.append(head, meta);
+    row.append(check, info);
+    row.addEventListener('click', () => { tune.selected = rec.id; renderTuneLogs(); drawTuneChart(); });
+    frag.append(row);
+  }
+  box.replaceChildren(frag);
+}
+
+/* ---- 存在浏览器里（IndexedDB）：断开、关页面都还在，换电脑用导出/导入 ---- */
+function openTuneDb() {
+  return new Promise(resolve => {
+    try {
+      const req = indexedDB.open('agv-console', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('tuneLogs', { keyPath: 'id' });
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch { resolve(null); }
+  });
+}
+
+function tuneStore(mode) {
+  try { return tune.db?.transaction('tuneLogs', mode).objectStore('tuneLogs') || null; } catch { return null; }
+}
+
+function dbPut(rec) {
+  const store = tuneStore('readwrite');
+  if (store) store.put(rec).onerror = e => setTuneState('存日志失败：' + e.target.error?.message);
+}
+
+async function loadTuneLogs() {
+  tune.db = await openTuneDb();
+  const store = tuneStore('readonly');
+  if (!store) { setTuneState('浏览器不让这个页面存数据（无痕窗口？），日志只在页面开着时有，记得导出。'); return; }
+  const req = store.getAll();
+  req.onsuccess = () => {
+    tune.logs = [...req.result, ...tune.logs].sort((a, b) => a.id - b.id);
+    for (const l of tune.logs) tune.nextId = Math.max(tune.nextId, l.id + 1);
+    renderTuneLogs();
+    updateTuneButtons();
+  };
+}
+
+function exportTuneLogs() {
+  const chosen = tune.logs.filter(l => l.use);
+  if (!chosen.length) { setTuneState('先勾上要导出的日志。'); return; }
+  const logs = chosen.map(l => {
+    const o = { ...l };
+    for (const k of Object.keys(TUNE_ARRAYS)) o[k] = Array.from(l[k]);
+    delete o.metrics;
+    return o;
+  });
+  const d = new Date(), two = v => String(v).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}_${two(d.getHours())}${two(d.getMinutes())}`;
+  downloadText(`agv_tune_logs_${stamp}.json`, JSON.stringify({ format: 'agv-tune-logs', version: 1, logs }), 'application/json');
+}
+
+async function importTuneLogs(file) {
+  try {
+    const data = JSON.parse(await file.text());
+    if (data?.format !== 'agv-tune-logs' || !Array.isArray(data.logs)) throw new Error('不是调参日志文件');
+    const fresh = data.logs.map(raw => {
+      if (!raw || !Number.isInteger(raw.n) || !raw.params || typeof raw.params !== 'object') throw new Error('日志数据不完整');
+      const rec = { ...raw, id: tune.nextId++, use: true };
+      for (const [k, Type] of Object.entries(TUNE_ARRAYS)) {
+        if (!Array.isArray(raw[k]) || raw[k].length !== raw.n) throw new Error('日志数据不完整');
+        rec[k] = Type.from(raw[k]);
+      }
+      rec.metrics = PidTune.recordMetrics(rec);
+      return rec;
+    });
+    for (const rec of fresh) { tune.logs.push(rec); dbPut(rec); }
+    renderTuneLogs();
+    updateTuneButtons();
+    setTuneState(`导入了 ${fresh.length} 段日志。`);
+  } catch (e) {
+    setTuneState('导入失败：' + e.message);
+  }
+}
+
+function deleteTuneLogs() {
+  const chosen = tune.logs.filter(l => l.use);
+  if (!chosen.length || !confirm(`删除勾选的 ${chosen.length} 段日志？删了就没了，要留着先导出。`)) return;
+  const store = tuneStore('readwrite');
+  for (const l of chosen) store?.delete(l.id);
+  tune.logs = tune.logs.filter(l => !l.use);
+  if (!tune.logs.some(l => l.id === tune.selected)) tune.selected = 0;
+  renderTuneLogs();
+  drawTuneChart();
+  updateTuneButtons();
+}
+
+/* ---- 自动测试：一个动作一个动作发，等它的日志传回来再发下一个 ---- */
+function setTuneProgress(test, text) {
+  $('tuneBar').style.width = test ? `${(100 * test.index) / test.steps.length}%` : '0%';
+  setTuneState(text || `第 ${test.index + 1}/${test.steps.length} 步：${test.current}，做完等日志传回来…`);
+}
+
+/* 急停、断开、固件重启时打断正在跑的测试。 */
+function stopTuneTest(reason) {
+  if (!tune.test) return;
+  tune.test.stop = true;
+  tune.test.reason = reason;
+  tune.waiter?.(null);
+  for (const w of [...lineWaiters]) w.done(null);
+}
+
+async function runTuneTest(kind) {
+  if (!window.PidTune || tune.test || !app.port || app.running) return;
+  const moves = $('tuneMoves').checked;
+  const steps = moves ? [...TUNE_TURNS, ...TUNE_MOVES] : [...TUNE_TURNS];
+  if (!confirm(`车会自己动：原地左右转（最大 90°）${moves ? '，再前后左右各走 300 mm' : ''}，最后回到原处。确认车放在地上、周围空出 40 cm？中途按 Esc 急停。`)) return;
+  const test = tune.test = { id: Date.now(), kind, steps, index: 0, current: '', records: [], stop: false, reason: '' };
+  const plotGroup = plot.group;
+  if (plotGroup) send('/plot off'); // 曲线流和日志抢串口
+  send('/log on');
+  updateTuneButtons();
+  let problem = '';
+  for (const cmd of steps) {
+    test.current = cmd;
+    setTuneProgress(test);
+    for (let i = 0; i < 100 && tune.parser.active() && !test.stop; ++i) await sleep(100); // 上一段还没传完
+    const ack = waitLine(/^(OK {3}path queued|BUSY |ERR )/, 2000);
+    if (!test.stop) send(cmd);
+    const reply = await ack;
+    if (test.stop) break;
+    if (!reply || !reply.startsWith('OK')) { problem = reply ? `固件没接受 ${cmd}：${reply}` : `${cmd} 发出去没有回复`; break; }
+    const r = await waitTuneEvent(30000);
+    if (test.stop) break;
+    if (!r || r.kind !== 'record') {
+      problem = !r ? `${cmd} 的日志 30 秒内没收到` : r.kind === 'abort' ? `${cmd} 的日志作废了（中途又动了）` : `${cmd} 的日志缺行，串口可能丢字`;
+      break;
+    }
+    if (r.record.end !== 'done') { problem = `${cmd} 没有正常走完（${r.record.end === 'fault' ? '底盘故障' : '被停下了'}）`; break; }
+    ++test.index;
+    await sleep(300);
+  }
+  if (test.stop) problem = test.reason || '停了';
+  if (app.port) {
+    if (!$('tuneAuto').checked) send('/log off');
+    if (plotGroup) send(`/plot ${plotGroup} ${$('plotHz').value}`);
+  }
+  tune.test = null;
+  setTuneProgress(null, problem ? `测试中断：${problem}。已经收到的 ${test.records.length} 段日志存下了。` : `测试完成，${test.records.length} 段日志存下了。`);
+  updateTuneButtons();
+  if (problem) return;
+  if (kind === 'verify') showVerify(test.records);
+  else await trainTune();
+}
+
+/* ---- 训练：拟合模型，在模型上搜参数 ---- */
+function liveParams() {
+  const out = {};
+  for (const name of TUNE_PARAMS) {
+    const p = params.get(name);
+    if (!p) return null;
+    out[name] = p.value;
+  }
+  return out;
+}
+
+function moveSpeed(recs) {
+  if (params.has('cmd_speed')) return params.get('cmd_speed').value;
+  let v = 0;
+  for (const r of recs) for (let k = 0; k < r.n; ++k) v = Math.max(v, Math.abs(r.vx[k]), Math.abs(r.vy[k]));
+  return v > 50 ? v : 400;
+}
+
+async function trainTune() {
+  if (tune.busy || !window.PidTune) return;
+  const recs = tune.logs.filter(l => l.use);
+  if (!recs.length) { setTuneState('先勾上要用的日志。'); return; }
+  tune.busy = true;
+  updateTuneButtons();
+  $('tuneTrainBar').style.width = '5%';
+  setTuneState(`用 ${recs.length} 段日志训练…`);
+  await sleep(30); // 先让页面画出进度条
+  try {
+    tune.model = PidTune.identify(recs);
+    tune.result = null;
+    renderModel();
+    if (tune.model.ok) {
+      const live = liveParams();
+      tune.baseFrom = live ? '车上现在' : '最新日志';
+      const base = PidTune.gainsFromParams(live || recs[recs.length - 1].params);
+      tune.result = await PidTune.optimize(tune.model, base, {
+        speed: moveSpeed(recs), onProgress: f => { $('tuneTrainBar').style.width = `${5 + 95 * f}%`; },
+      });
+    }
+    setTuneState(tune.model.ok ? '训练完了，推荐值在右边。' : '模型不可信，看右边的提示。');
+  } catch (e) {
+    setTuneState('训练出错：' + e.message);
+  } finally {
+    tune.busy = false;
+    $('tuneTrainBar').style.width = '0%';
+  }
+  tune.chart = null;
+  renderRecommendation();
+  drawTuneChart();
+  updateTuneButtons();
+}
+
+function renderModel() {
+  const m = tune.model, p = m?.plant;
+  const f = (v, d) => (p && Number.isFinite(v) ? v.toFixed(d) : '--');
+  setText('mK', f(p?.K, 3));
+  setText('mTau', f(p?.tau * 1000, 1));
+  setText('mDelay', f(p?.delay * 1000, 1));
+  setText('mCx', f(p?.cx * 100, 2));
+  setText('mCy', f(p?.cy * 100, 2));
+  setText('mRms', m && Number.isFinite(m.rms) ? m.rms.toFixed(3) : '--');
+  const warn = $('tuneWarn');
+  warn.textContent = m ? m.warnings.join(' ') : '';
+  warn.className = 'alarm' + (m && !m.ok ? ' fault' : m?.warnings.length ? ' wait' : '');
+}
+
+function tableRow(body, cells, head = false, classes = []) {
+  const tr = el('tr');
+  cells.forEach((c, i) => tr.append(el(head ? 'th' : 'td', classes[i] || '', c)));
+  body.append(tr);
+}
+
+/* 推荐值和现在比：小于 3% 的差别不标颜色。 */
+function compareClass(now, next) {
+  if (!Number.isFinite(now) && !Number.isFinite(next)) return '';
+  if (!Number.isFinite(next)) return 'worse';
+  if (!Number.isFinite(now)) return 'better';
+  return next < now * 0.97 - 1e-3 ? 'better' : next > now * 1.03 + 1e-3 ? 'worse' : '';
+}
+
+function renderRecommendation() {
+  const r = tune.result;
+  const gains = $('tuneGains').tBodies[0], predict = $('tunePredict').tBodies[0];
+  gains.replaceChildren();
+  predict.replaceChildren();
+  $('tuneMacro').hidden = !r;
+  setText('tuneMargin', '');
+  if (!r) {
+    setText('tuneSummary', tune.model && !tune.model.ok ? '模型不可信，没给推荐值。' : '训练以后在这里出推荐值。');
+    return;
+  }
+  const now = r.current, best = r.best, p = tune.model.plant, from = tune.baseFrom;
+  const pct = Math.round((1 - best.score / now.score) * 100);
+  setText('tuneSummary', `用 ${tune.model.records} 段日志拟合的模型，和${from === '车上现在' ? '车上现在的参数' : '最新一段日志里的参数（没连车）'}比，` +
+    `在 ${r.plants} 辆参数随机变化的车上打分（到位时间加上超调、平移误差折算，越小越好）：${now.score.toFixed(2)} → ${best.score.toFixed(2)}，` +
+    `${pct >= 0 ? `好 ${pct}%` : `差 ${-pct}%`}。`);
+  tableRow(gains, ['参数', from, '推荐'], true);
+  for (const [label, key, digits] of [['航向 Kp', 'kp', 2], ['航向 Ki', 'ki', 2], ['积分上限 °/s', 'iMax', 1]])
+    tableRow(gains, [label, now.gains[key].toFixed(digits), best.gains[key].toFixed(digits)], false,
+      ['', '', best.gains[key] !== now.gains[key] ? 'changed' : '']);
+  tableRow(predict, ['模型预测', from, '推荐'], true);
+  const fs = v => (Number.isFinite(v) ? `${v.toFixed(2)} s` : '没到位');
+  now.nominal.forEach((a, i) => {
+    const b = best.nominal[i];
+    tableRow(predict, [`${a.label} 到位`, fs(a.settle), fs(b.settle)], false, ['', '', compareClass(a.settle, b.settle)]);
+    if (a.kind === 'turn')
+      tableRow(predict, [`${a.label} 超调`, `${a.overshoot.toFixed(2)}°`, `${b.overshoot.toFixed(2)}°`], false,
+        ['', '', compareClass(Math.max(a.overshoot, 0.05), Math.max(b.overshoot, 0.05))]);
+    else
+      tableRow(predict, [`${a.label} 航向最大差`, `${a.peakMove.toFixed(2)}°`, `${b.peakMove.toFixed(2)}°`], false,
+        ['', '', compareClass(a.peakMove, b.peakMove)]);
+  });
+  tableRow(predict, ['最差的那辆车', now.worst.toFixed(2), best.worst.toFixed(2)], false, ['', '', compareClass(now.worst, best.worst)]);
+  const gm = m => (Number.isFinite(m.gm) ? `${m.gm.toFixed(1)} dB` : '无限');
+  setText('tuneMargin', `推荐值的相位裕度 ${best.margins.pm.toFixed(0)}°、增益裕度 ${gm(best.margins)}（${from}：${now.margins.pm.toFixed(0)}°、${gm(now.margins)}）。只看小误差的线性化结果，限幅和积分区不算在内。`);
+  $('tuneMacro').textContent =
+    `/* User/Chassis/chassis.h，自动调参推荐：K=${p.K.toFixed(3)} 惯性 ${(p.tau * 1000).toFixed(0)} ms 延迟 ${(p.delay * 1000).toFixed(0)} ms */\n` +
+    `#define CHASSIS_HEADING_KP    ${best.gains.kp.toFixed(2)}f\n` +
+    `#define CHASSIS_HEADING_KI    ${best.gains.ki.toFixed(2)}f\n` +
+    `#define CHASSIS_HEADING_I_MAX ${best.gains.iMax.toFixed(1)}f`;
+}
+
+function applyTune() {
+  const g = tune.result?.best.gains;
+  if (!g || !app.port) return;
+  const missing = [];
+  for (const [name, value] of [['heading_kp', g.kp], ['heading_ki', g.ki], ['heading_i_max', g.iMax]]) {
+    const p = params.get(name);
+    if (p) commitParam(p, String(value)); else missing.push(name);
+  }
+  setTuneState(missing.length ? `固件里没读到这些参数：${missing.join('、')}，先到调试台点“读取”。`
+    : '发给固件了。固件断电会恢复默认（调试台记着，重连时提示写回）；定稿后把右边的宏写回 chassis.h。');
+}
+
+/* 验证：用新参数跑的日志，每个动作比模型预测和实测。 */
+function showVerify(records) {
+  const body = $('tuneVerifyTable').tBodies[0];
+  body.replaceChildren();
+  if (!tune.model?.ok) { setText('tuneVerifyNote', '先训练出模型再验证。'); return; }
+  tableRow(body, ['动作', '预测', '实测'], true);
+  let total = 0, close = 0;
+  const fs = v => (Number.isFinite(v) ? `${v.toFixed(2)} s` : '没到位');
+  for (const rec of records) {
+    for (const row of PidTune.verify([rec], tune.model.plant)) {
+      const real = row.measured, pred = row.predicted;
+      const ok = row.kind === 'turn'
+        ? Math.abs(pred.settle - real.settle) <= Math.max(0.15, 0.25 * real.settle)
+        : Math.abs(pred.peakMove - real.peakMove) <= Math.max(0.1, 0.3 * real.peakMove);
+      ++total;
+      if (ok) ++close;
+      const name = rec.label.split(' · ')[0].replace('验证 ', '');
+      if (row.kind === 'turn') tableRow(body, [`${name} 到位`, fs(pred.settle), fs(real.settle)], false, ['', '', ok ? '' : 'worse']);
+      else tableRow(body, [`${name} 航向最大差`, `${pred.peakMove.toFixed(2)}°`, `${real.peakMove.toFixed(2)}°`], false, ['', '', ok ? '' : 'worse']);
+    }
+  }
+  setText('tuneVerifyNote', `${close}/${total} 个动作预测和实测对得上（转向到位时间差在 25% 或 0.15 s 以内，平移误差差在 30% 或 0.1° 以内）。` +
+    (close < total ? '对不上的多就把这次的日志也勾上（已经默认勾上了）再训练一次。' : '模型可信，推荐值可以定稿写回 chassis.h。'));
+}
+
+/* ---- 日志曲线：实测（航向、航向环输出），训练过就叠上模型按同样的命令算出来的 ---- */
+function buildTuneChart(rec) {
+  const replay = tune.model?.ok ? PidTune.replay(rec, tune.model.plant) : null;
+  const y0 = rec.yaw[0], rel = a => Float64Array.from(a, v => v - y0);
+  const top = [{ name: '目标航向', color: 'axis', data: rel(rec.target), dash: true }, { name: '实测航向', color: 0, data: rel(rec.yaw) }];
+  if (replay) top.push({ name: '模型算的航向', color: 1, data: rel(replay.trace.yaw), dash: true }); // 虚线：和实测重合时还看得见实测
+  const bottom = [{ name: '航向环输出（实测）', color: 2, data: rec.pid }];
+  if (replay) bottom.push({ name: '航向环输出（模型）', color: 1, data: replay.trace.pid, dash: true });
+  tune.chart = { rec, model: tune.model, panels: [{ series: top, unit: '航向 °（相对起点）' }, { series: bottom, unit: '°/s' }] };
+  const legend = $('tuneLegend');
+  legend.replaceChildren();
+  for (const s of [...top, ...bottom]) {
+    const item = el('span');
+    const key = el('i', s.dash ? 'dash' : '');
+    key.style.color = key.style.background = s.color === 'axis' ? css.axis : css.series[s.color];
+    item.append(key, document.createTextNode(s.name));
+    legend.append(item);
+  }
+  setText('tuneChartTitle', `${rec.label}${replay ? `，模型和实测差 ${replay.rmsYaw.toFixed(3)}°（均方根）` : ''}`);
+}
+
+function drawTuneChart() {
+  if (app.workspace !== 'tune') return;
+  const canvas = $('tuneChart'), rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== Math.round(rect.width * dpr) || canvas.height !== Math.round(rect.height * dpr)) {
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  const rec = tune.logs.find(l => l.id === tune.selected);
+  $('tuneChartEmpty').style.display = rec ? 'none' : 'flex';
+  $('tuneTip').style.display = 'none';
+  if (!rec) { $('tuneLegend').replaceChildren(); setText('tuneChartTitle', ''); return; }
+  if (!tune.chart || tune.chart.rec !== rec || tune.chart.model !== tune.model) buildTuneChart(rec);
+  const left = 52, right = 10, top = 8, bottom = 22, gap = 22;
+  const w = rect.width - left - right, h = rect.height - top - bottom - gap;
+  if (w <= 0 || h <= 40) return;
+  const n = rec.n, xOf = k => left + (k / Math.max(1, n - 1)) * w;
+  const heights = [h * 0.62, h * 0.38];
+  let y = top;
+  ctx.font = '11px ui-monospace, Consolas, monospace';
+  tune.chart.panels.forEach((panel, pi) => {
+    const ph = heights[pi];
+    let min = Infinity, max = -Infinity;
+    for (const s of panel.series) for (let k = 0; k < n; ++k) { min = Math.min(min, s.data[k]); max = Math.max(max, s.data[k]); }
+    if (max - min < 1e-6) { min -= 1; max += 1; }
+    const pad = (max - min) * 0.08;
+    min -= pad; max += pad;
+    const step = niceStep(max - min, Math.max(2, Math.floor(ph / 38)));
+    const yOf = v => y + ph - ((v - min) / (max - min)) * ph;
+    const decimals = step >= 1 ? 0 : Math.ceil(-Math.log10(step));
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let v = Math.ceil(min / step) * step; v <= max; v += step) {
+      const gy = Math.round(yOf(v)) + 0.5;
+      ctx.strokeStyle = Math.abs(v) < step / 2 ? css.axis : css.grid;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(left, gy); ctx.lineTo(left + w, gy); ctx.stroke();
+      ctx.fillStyle = css['text-3'];
+      ctx.fillText(v.toFixed(decimals), left - 6, gy);
+    }
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(panel.unit, left + 4, y + 2);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(left, y, w, ph); ctx.clip();
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    for (const s of panel.series) {
+      ctx.strokeStyle = s.color === 'axis' ? css.axis : css.series[s.color];
+      ctx.setLineDash(s.dash ? [5, 4] : []);
+      ctx.beginPath();
+      for (let k = 0; k < n; ++k) (k ? ctx.lineTo : ctx.moveTo).call(ctx, xOf(k), yOf(s.data[k]));
+      ctx.stroke();
+    }
+    ctx.restore();
+    panel.box = { y, ph, yOf };
+    y += ph + gap;
+  });
+  // 固件判“走完了”的那一拍
+  ctx.setLineDash([2, 3]);
+  ctx.strokeStyle = css['text-3'];
+  ctx.lineWidth = 1;
+  for (let k = 1; k < n; ++k) {
+    if (!(rec.motion[k - 1] && !rec.motion[k])) continue;
+    ctx.beginPath(); ctx.moveTo(Math.round(xOf(k)) + 0.5, top); ctx.lineTo(Math.round(xOf(k)) + 0.5, top + h + gap); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  const dur = (n - 1) * PidTune.DT, tStep = niceStep(dur, Math.max(2, Math.floor(w / 70)));
+  ctx.fillStyle = css['text-3'];
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let t = 0; t <= dur + 1e-9; t += tStep) ctx.fillText(`${+t.toFixed(2)}s`, Math.max(left + 10, Math.min(xOf(t / PidTune.DT), left + w - 12)), top + h + gap + 6);
+  if (tune.hover === null || tune.hover < left || tune.hover > left + w) return;
+  const k = Math.round(((tune.hover - left) / w) * (n - 1));
+  const hx = Math.round(xOf(k)) + 0.5;
+  ctx.strokeStyle = css.axis;
+  ctx.beginPath(); ctx.moveTo(hx, top); ctx.lineTo(hx, top + h + gap); ctx.stroke();
+  const tip = $('tuneTip');
+  tip.replaceChildren(el('div', '', `${(k * PidTune.DT).toFixed(3)} s${rec.motion[k] ? '' : '（停了，保持航向）'}`));
+  for (const panel of tune.chart.panels)
+    for (const s of panel.series) {
+      const row = el('div'), key = el('i');
+      key.style.background = s.color === 'axis' ? css.axis : css.series[s.color];
+      row.append(key, document.createTextNode(s.name), el('b', '', s.data[k].toFixed(3)));
+      tip.append(row);
+    }
+  tip.style.display = 'block';
+  const tw = tip.offsetWidth;
+  tip.style.left = `${hx + 12 + tw > rect.width ? hx - tw - 12 : hx + 12}px`;
+  tip.style.top = `${top + 4}px`;
+}
+
+function updateTuneButtons() {
+  const ready = Boolean(window.PidTune);
+  const canMove = ready && Boolean(app.port) && !app.running && app.mode !== 'SURVEY' && !tune.test;
+  $('tuneStart').disabled = !canMove;
+  $('tuneStart').title = app.mode === 'SURVEY' ? '巡检模式不接受手动运动：勾上“平时每个动作也存日志”，用巡检路线的日志训练' : '';
+  $('tuneAbort').disabled = !tune.test;
+  $('tuneTrain').disabled = !ready || tune.busy || !tune.logs.some(l => l.use);
+  $('tuneApply').disabled = !tune.result || !app.port || app.running || Boolean(tune.test);
+  $('tuneVerify').disabled = !canMove || !tune.result;
+}
+
 /* ---------- 终端 ---------- */
 const LOG_LIMIT = 1500;
 const logQueue = [];
@@ -1826,9 +2491,9 @@ let historyAt = 0;
 
 /* ---------- 事件 ---------- */
 $('connect').addEventListener('click', () => (app.port ? disconnect() : connect()));
-$('stop').addEventListener('click', () => send('S'));
+$('stop').addEventListener('click', () => { send('S'); stopTuneTest('急停了'); });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && app.port) { e.preventDefault(); send('S'); }
+  if (e.key === 'Escape' && app.port) { e.preventDefault(); send('S'); stopTuneTest('急停了'); }
 });
 $('reload').addEventListener('click', () => send('/list'));
 $('resetAll').addEventListener('click', () => {
@@ -1952,7 +2617,36 @@ $('visionColor').addEventListener('change', () => {
   if (on && app.port) send(`/vision ${on.dataset.mode} ${$('visionColor').value}`);
 });
 
-window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', readColors);
+$('tuneStart').addEventListener('click', () => runTuneTest('test'));
+$('tuneVerify').addEventListener('click', () => runTuneTest('verify'));
+$('tuneAbort').addEventListener('click', () => { send('S'); stopTuneTest('按了停止'); });
+$('tuneTrain').addEventListener('click', trainTune);
+$('tuneApply').addEventListener('click', applyTune);
+$('tuneSelectAll').addEventListener('click', () => {
+  const all = tune.logs.every(l => l.use);
+  for (const l of tune.logs) { l.use = !all; dbPut(l); }
+  renderTuneLogs();
+  updateTuneButtons();
+});
+$('tuneExport').addEventListener('click', exportTuneLogs);
+$('tuneImport').addEventListener('click', () => $('tuneImportFile').click());
+$('tuneImportFile').addEventListener('change', e => {
+  if (e.target.files[0]) importTuneLogs(e.target.files[0]);
+  e.target.value = '';
+});
+$('tuneDelete').addEventListener('click', deleteTuneLogs);
+$('tuneAuto').addEventListener('change', () => {
+  try { localStorage.setItem(TUNE_AUTO_KEY, $('tuneAuto').checked ? '1' : '0'); } catch { /* 存不了，只管这一次 */ }
+  if (app.port && !tune.test) send(`/log ${$('tuneAuto').checked ? 'on' : 'off'}`);
+});
+$('tuneChart').addEventListener('pointermove', e => {
+  tune.hover = e.clientX - $('tuneChart').getBoundingClientRect().left;
+  drawTuneChart();
+});
+$('tuneChart').addEventListener('pointerleave', () => { tune.hover = null; drawTuneChart(); });
+new ResizeObserver(() => drawTuneChart()).observe($('tuneChartWrap'));
+
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { readColors(); tune.chart = null; drawTuneChart(); });
 if ('serial' in navigator) {
   navigator.serial.addEventListener?.('disconnect', e => { if (e.target === app.port) disconnect('串口被拔掉了'); });
 } else {
@@ -1964,6 +2658,9 @@ readColors();
 setConnected(false);
 setPlotActive(null);
 requestAnimationFrame(plotLoop);
+try { $('tuneAuto').checked = localStorage.getItem(TUNE_AUTO_KEY) === '1'; } catch { /* 无痕窗口：默认关 */ }
+if (window.PidTune) loadTuneLogs();
+else setTuneState('找不到 pid_tune.js：它要和 agv_console.html 放在同一个文件夹。');
 </script>
 </body>
 </html>
