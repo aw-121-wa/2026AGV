@@ -44,7 +44,7 @@ static const Param params[] = {
     CHASSIS_PARAM(settle_ms, 0.0f, 2000.0f, 0U, 0U),
     CHASSIS_PARAM(acc_linear, 100.0f, 5000.0f, 0U, 0U),
     CHASSIS_PARAM(acc_angular, 30.0f, 3000.0f, 0U, 0U),
-    CHASSIS_PARAM(cmd_speed, 10.0f, 400.0f, 1U, 0U),
+    CHASSIS_PARAM(cmd_speed, 10.0f, CHASSIS_MOVE_MAX_SPEED, 1U, 0U),
     CHASSIS_PARAM(wheel_dia, 40.0f, 150.0f, 2U, STOPPED_ONLY),
     CHASSIS_PARAM(chassis_k, 100.0f, 400.0f, 2U, STOPPED_ONLY),
     CHASSIS_PARAM(path_deviation, 0.5f, 50.0f, 2U, STOPPED_ONLY),

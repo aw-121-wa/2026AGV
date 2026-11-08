@@ -1057,7 +1057,7 @@ const PARAM_INFO = {
   settle_ms: ['稳定时间', 'distance', 'ms', '停稳多久算完成'],
   acc_linear: ['线加速度', 'motion', 'mm/s²', '起步、刹车和拐角限速都用它'],
   acc_angular: ['角加速度', 'motion', '°/s²', ''],
-  cmd_speed: ['移动速度', 'motion', 'mm/s', '从下一条路径开始生效'],
+  cmd_speed: ['移动速度', 'motion', 'mm/s', '从下一条路径开始生效；上限由固件同步，新版最高 2000 mm/s'],
   wheel_dia: ['轮径', 'calib', 'mm', '标定里程计'],
   chassis_k: ['旋转系数 K', 'calib', 'mm', '(轴距 + 轮距) / 2'],
   path_deviation: ['拐角偏差', 'calib', 'mm', '越大过弯越快，轨迹离折线越远'],

@@ -59,7 +59,7 @@
 
 /* 串口指令模式（F/B/L/R/T/A）的移动速度 mm/s。 */
 #ifndef CHASSIS_COMMAND_SPEED_MM_S
-#define CHASSIS_COMMAND_SPEED_MM_S 400.0f
+#define CHASSIS_COMMAND_SPEED_MM_S 1000.0f
 #endif
 
 #define AGV_SEARCH_BUDGET  32U // 每拍 A* 最多扩展的节点数

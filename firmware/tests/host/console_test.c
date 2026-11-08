@@ -490,12 +490,12 @@ static void TestRangeLimitsInclusive(void)
     AssertNear(chassis_tune.heading_kp, 0.0f, 1e-6f);
     Line("/set heading_kp +3"); // 正号也是合法写法
     AssertNear(chassis_tune.heading_kp, 3.0f, 1e-6f);
-    Line("/set cmd_speed 400");
-    AssertNear(chassis_tune.cmd_speed, 400.0f, 1e-6f);
+    Line("/set cmd_speed 2000");
+    AssertNear(chassis_tune.cmd_speed, 2000.0f, 1e-6f);
     ClearOutput();
-    Line("/set cmd_speed 401"); // 硬限速不能被控制台绕过
+    Line("/set cmd_speed 2001"); // 硬限速不能被控制台绕过
     assert(strstr(Output(), "ERR"));
-    AssertNear(chassis_tune.cmd_speed, 400.0f, 1e-6f);
+    AssertNear(chassis_tune.cmd_speed, 2000.0f, 1e-6f);
 }
 
 /* 存进去的值按小数位数取整，显示的就是实际用的。 */

@@ -17,10 +17,10 @@
 #define CHASSIS_PERIOD_S  0.005f
 
 /* 输入限幅与斜坡 */
-#define CHASSIS_MAX_LINEAR    1200.0f // mm/s
+#define CHASSIS_MAX_LINEAR    2000.0f // mm/s
 #define CHASSIS_MAX_ANGULAR   240.0f  // deg/s
 #define CHASSIS_ACC_LINEAR    2000.0f // mm/s^2，前向和横向共用，暂不猜测横向摩擦系数
-#define CHASSIS_MAX_WHEEL_RPM 400U    // 底盘轮速上限，独立于驱动器协议极限
+#define CHASSIS_MAX_WHEEL_RPM 750U    // 底盘轮速上限，独立于驱动器协议极限
 #define CHASSIS_ACC_ANGULAR   720.0f // deg/s^2
 
 /* 驱动器下发 */
@@ -33,15 +33,15 @@
 #define CHASSIS_MOVE_MAX_MM         5000.0f
 #define CHASSIS_MOVE_TIMEOUT_US     30000000U
 #define CHASSIS_FEEDBACK_TIMEOUT_MS 500U
-#define CHASSIS_MOVE_MAX_SPEED      400.0f // mm/s
+#define CHASSIS_MOVE_MAX_SPEED      2000.0f // mm/s
 #define CHASSIS_DISTANCE_KP         1.5f   // 1/s
 #define CHASSIS_DISTANCE_TOL_MM     3.0f
-#define CHASSIS_HEADING_KP          2.0f  // (deg/s)/deg
-#define CHASSIS_TURN_MAX_SPEED      90.0f // deg/s
+#define CHASSIS_HEADING_KP          5.6f  // (deg/s)/deg
+#define CHASSIS_TURN_MAX_SPEED      180.0f // deg/s
 #define CHASSIS_HEADING_TOL_DEG     0.1f  // 静态验收误差上限（仍需外部基准实测）
 #define CHASSIS_DYNAMIC_TOL_DEG     0.2f  // 平移期间航向误差验收上限
-#define CHASSIS_HEADING_KI          1.0f  // 初始积分增益，实车低速标定
-#define CHASSIS_HEADING_I_MAX       5.0f  // 积分输出上限，deg/s
+#define CHASSIS_HEADING_KI          2.14f  // 初始积分增益，实车低速标定
+#define CHASSIS_HEADING_I_MAX       7.0f  // 积分输出上限，deg/s
 #define CHASSIS_HEADING_I_ZONE      8.0f  // 小误差积分，避免大角度转向积累
 #define CHASSIS_SETTLE_US           200000U
 #define CHASSIS_YAW_SIGN            1.0f // 校准后使逆时针为正
@@ -60,13 +60,13 @@
 #define CHASSIS_WHEEL_DIR_LF 1
 #endif
 #ifndef CHASSIS_WHEEL_DIR_RF
-#define CHASSIS_WHEEL_DIR_RF 1
+#define CHASSIS_WHEEL_DIR_RF -1
 #endif
 #ifndef CHASSIS_WHEEL_DIR_LR
 #define CHASSIS_WHEEL_DIR_LR 1
 #endif
 #ifndef CHASSIS_WHEEL_DIR_RR
-#define CHASSIS_WHEEL_DIR_RR 1
+#define CHASSIS_WHEEL_DIR_RR -1
 #endif
 /* 单轮测试：每个轮子按“前进方向”转 CHASSIS_WHEEL_TEST_RPM，持续 CHASSIS_WHEEL_TEST_MS，再停 300 ms
  * 读位置。 */
@@ -234,7 +234,7 @@ uint32_t Chassis_Micros(void);
 HAL_StatusTypeDef Chassis_MoveDistance(float forward_mm, float left_mm);
 // 同上，但移动中保持指定的绝对航向 heading_deg（用于跑图时锁定场地航向）。
 HAL_StatusTypeDef Chassis_MoveDistanceHold(float forward_mm, float left_mm, float heading_deg);
-// 空闲时设置下一次移动限速，超出 10~400 mm/s 会钳位到边界；运行中保持本次限速和超时一致。
+// 空闲时设置下一次移动限速，超出 10~2000 mm/s 会钳位到边界；运行中保持本次限速和超时一致。
 void Chassis_SetMoveSpeedLimit(float mm_per_second);
 
 // 单轮方向测试：mask bit0..3 = LF/RF/LR/RR；READY 且空闲才接受。轮子要离地！
