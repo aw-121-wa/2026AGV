@@ -8,6 +8,7 @@
 #define AGV_MODE_COMMAND     0
 #define AGV_MODE_SURVEY      1
 #define AGV_MODE_COMPETITION 2
+#define AGV_MODE_ARM         3 // 底盘一直停着，标定机械臂、跟随物料
 
 #ifndef AGV_MODE
 #define AGV_MODE AGV_MODE_COMMAND
@@ -17,14 +18,15 @@
 #define AGV_START_ZONE 1
 #endif
 
-#if AGV_MODE < 0 || AGV_MODE > 2 || AGV_START_ZONE < 1 || AGV_START_ZONE > 2
+#if AGV_MODE < 0 || AGV_MODE > 3 || AGV_START_ZONE < 1 || AGV_START_ZONE > 2
 #error Invalid AGV configuration
 #endif
 
 #define AGV_MODE_NAME                                                                              \
-    (AGV_MODE == AGV_MODE_COMMAND  ? "COMMAND"                                                     \
-     : AGV_MODE == AGV_MODE_SURVEY ? "SURVEY"                                                      \
-                                   : "COMPETITION")
+    (AGV_MODE == AGV_MODE_COMMAND       ? "COMMAND"                                                \
+     : AGV_MODE == AGV_MODE_SURVEY      ? "SURVEY"                                                 \
+     : AGV_MODE == AGV_MODE_COMPETITION ? "COMPETITION"                                            \
+                                        : "ARM")
 
 /* At startup front faces field +X. IMU zero is captured automatically. */
 #define AGV_START_DELAY_MS   3000U

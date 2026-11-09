@@ -94,11 +94,12 @@ static void AssertNear(float got, float want, float tolerance)
 static void TestHeadingLoopFollowsParameters(void)
 {
     Begin();
-    AssertNear(Control(1.0f, 0), 2.005f, 1e-4f); // 默认 2 × 1° + 1 × 1° × 5 ms
+    const float ki_step = CHASSIS_HEADING_KI * 0.005f; // 默认积分 1° 一拍 5 ms
+    AssertNear(Control(1.0f, 0), CHASSIS_HEADING_KP + ki_step, 1e-4f);
 
     Line("/set heading_kp 4");
     s_heading_integral = 0.0f;
-    AssertNear(Control(1.0f, 0), 4.005f, 1e-4f);
+    AssertNear(Control(1.0f, 0), 4.0f + ki_step, 1e-4f);
 
     Line("/set heading_ki 3");
     s_heading_integral = 0.0f;
@@ -125,7 +126,7 @@ static void TestZeroKiClearsIntegral(void)
     Begin();
     Line("/set heading_ki 0");
     s_heading_integral = 3.0f;
-    AssertNear(Control(1.0f, 0), 2.0f, 1e-4f);
+    AssertNear(Control(1.0f, 0), CHASSIS_HEADING_KP, 1e-4f);
     AssertNear(s_heading_integral, 0.0f, 1e-6f);
 }
 
@@ -359,7 +360,7 @@ static void TestWheelDiameterScalesKinematics(void)
     /* 里程计：四轮各转一圈 = π × 140 mm。 */
     float x0 = chassis.pos_x;
     for (int i = 0; i < 4; ++i)
-        motors[i].position_deg += 360.0f;
+        WheelTurn(i, 360.0f);
     tick(1);
     AssertNear(chassis.pos_x - x0, 439.8f, 0.5f);
 }
@@ -373,7 +374,7 @@ static void TestWheelDiameterScalesPathPrediction(void)
     Line("F25");
     assert(chassis.mode == CHASSIS_MODE_PATH);
     for (int i = 0; i < 4; ++i)
-        motors[i].speed_rpm = 60.0f;
+        WheelSpeed(i, 60.0f);
     for (int i = 0; i < 9; ++i)
         tick(0);
     AssertNear(chassis.target.vx, 59.3f, 1.0f);
@@ -394,10 +395,10 @@ static void TestChassisKScalesRotation(void)
 #if !CHASSIS_USE_IMU
     /* 无陀螺仪时航向靠轮子推算：K 减半，同样的轮差算出两倍转角。 */
     float yaw0 = chassis.yaw;
-    motors[0].position_deg -= 36.0f;
-    motors[1].position_deg += 36.0f;
-    motors[2].position_deg -= 36.0f;
-    motors[3].position_deg += 36.0f;
+    WheelTurn(0, -36.0f);
+    WheelTurn(1, 36.0f);
+    WheelTurn(2, -36.0f);
+    WheelTurn(3, 36.0f);
     tick(1);
     /* 每轮走 π × 77 × 36 / 360 = 24.19 mm，dθ = 24.19 ÷ 110.1 rad = 12.59°。 */
     AssertNear(chassis.yaw - yaw0, 12.59f, 0.05f);
@@ -475,7 +476,7 @@ static void TestBadInputChangesNothing(void)
             fprintf(stderr, "no ERR for: %s\n", bad[i]);
             assert(0);
         }
-        AssertNear(chassis_tune.heading_kp, 2.0f, 1e-6f);
+        AssertNear(chassis_tune.heading_kp, CHASSIS_HEADING_KP, 1e-6f);
     }
     assert(plot_group == TELEMETRY_PLOT_OFF);
 }
@@ -517,7 +518,7 @@ static void TestResetRestoresDefaults(void)
     Line("/set heading_ki 2");
     Line("/set wheel_dia 80");
     Line("/reset");
-    AssertNear(chassis_tune.heading_ki, 1.0f, 1e-6f);
+    AssertNear(chassis_tune.heading_ki, CHASSIS_HEADING_KI, 1e-6f);
     AssertNear(chassis_tune.wheel_dia, 77.0f, 1e-6f);
 }
 
@@ -525,8 +526,12 @@ static void TestResetRestoresDefaults(void)
 static void TestReplyFormatsForUi(void)
 {
     Begin();
+    const double kp = CHASSIS_HEADING_KP;
+    char want[96];
     Line("/list heading_kp");
-    assert(strcmp(Output(), "heading_kp      = 2.000  [0.000..20.000] default 2.000\r\n") == 0);
+    snprintf(want, sizeof(want), "heading_kp      = %.3f  [0.000..20.000] default %.3f\r\n", kp,
+             kp);
+    assert(strcmp(Output(), want) == 0);
 
     ClearOutput();
     Line("/list wheel_dia");
@@ -536,7 +541,8 @@ static void TestReplyFormatsForUi(void)
 
     ClearOutput();
     Line("/set heading_kp 2.5");
-    assert(strcmp(Output(), "OK   heading_kp 2.000 -> 2.500\r\n") == 0);
+    snprintf(want, sizeof(want), "OK   heading_kp %.3f -> 2.500\r\n", kp);
+    assert(strcmp(Output(), want) == 0);
 
     ClearOutput();
     Line("/set heading_kp 21");
@@ -595,7 +601,9 @@ static void TestList(void)
     Line("/set heading_kp 3");
     ClearOutput();
     Line("/list heading_kp");
-    assert(strstr(Output(), "= 3.000 ") && strstr(Output(), "default 2.000"));
+    char def[24];
+    snprintf(def, sizeof(def), "default %.3f", (double)CHASSIS_HEADING_KP);
+    assert(strstr(Output(), "= 3.000 ") && strstr(Output(), def));
 }
 
 /* 这个文件在指令模式下编译，比赛模式专用的命令不存在。 */
@@ -706,7 +714,7 @@ static void TestTooLongLineRejected(void)
     Begin();
     Line(longline);
     assert(strstr(Output(), "ERR"));
-    AssertNear(chassis_tune.heading_kp, 2.0f, 1e-6f);
+    AssertNear(chassis_tune.heading_kp, CHASSIS_HEADING_KP, 1e-6f);
     assert(chassis.mode == CHASSIS_MODE_VEL);
     Line("/set heading_kp 3");
     AssertNear(chassis_tune.heading_kp, 3.0f, 1e-6f);
@@ -724,14 +732,14 @@ static void TestReceiveOverflowDuringConsoleLine(void)
     ChassisCmd_Poll();
     assert(chassis.mode == CHASSIS_MODE_VEL);
     Burst("\r\n", 1); // 溢出前收到的半行要作废，不能在这里被当成完整命令执行
-    AssertNear(chassis_tune.heading_kp, 2.0f, 1e-6f);
+    AssertNear(chassis_tune.heading_kp, CHASSIS_HEADING_KP, 1e-6f);
     /* 溢出那一行没结束时，后面的 '/' 也不算行首。 */
     Burst("/set heading_kp 3", 0);
     for (unsigned i = 0; i < 300; ++i)
         Push('x');
     ChassisCmd_Poll();
     Burst("/set heading_kp 9\r\n", 1);
-    AssertNear(chassis_tune.heading_kp, 2.0f, 1e-6f);
+    AssertNear(chassis_tune.heading_kp, CHASSIS_HEADING_KP, 1e-6f);
     Line("/set heading_kp 3");
     AssertNear(chassis_tune.heading_kp, 3.0f, 1e-6f);
 }
@@ -742,7 +750,9 @@ static void TestHelpTexts(void)
     Line("H");
     /* 帮助的最后几行也要完整出来，不能被单次 Printf 的长度上限截断。 */
     assert(strstr(Output(), "H or ?"));
-    assert(strstr(Output(), "Move speed 400 mm/s"));
+    char speed[40];
+    snprintf(speed, sizeof(speed), "Move speed %.0f mm/s", (double)CHASSIS_COMMAND_SPEED_MM_S);
+    assert(strstr(Output(), speed));
     assert(strstr(Output(), "/help"));
 
     static const char *const console_help[] = {"/help", "/"};

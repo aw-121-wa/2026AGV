@@ -34,6 +34,7 @@
 #include "agv_config.h"
 #include "agv_run.h"
 #include "competition.h"
+#include "arm_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -134,6 +135,11 @@ int main(void)
   Agv_Init(AGV_MODE, AGV_START_ZONE);
 #if AGV_MODE == AGV_MODE_COMPETITION
   if (Comp_Init(AGV_START_ZONE) != HAL_OK) // 比赛模式：C1 雷达(USART1) + 视觉上位机(USART2) + 扫码模块(USART3)
+  {
+    Error_Handler();
+  }
+#elif AGV_MODE == AGV_MODE_ARM
+  if (ArmApp_Init() != HAL_OK) // 机械臂模式：两台关节电机（同一条 CAN）+ 视觉上位机(USART2)
   {
     Error_Handler();
   }

@@ -3,7 +3,7 @@
 
 #include "main.h"
 
-/* 比赛模式新增的三路串口，寄存器级中断收发 + 环形缓冲，不用 DMA（避免 D-Cache 一致性问题，
+/* 比赛模式新增的三路串口（机械臂模式只用视觉那一路），寄存器级中断收发 + 环形缓冲，不用 DMA（避免 D-Cache 一致性问题，
    也不需要改 CubeMX 的 MPU 配置）。外设、引脚、时钟、NVIC 都在 SerPort_Init 里自己配置，
    不进 .ioc，CubeMX 重新生成代码不会覆盖。
      SER_LIDAR   = USART1  PA9  TX / PA10 RX  AF7   RPLIDAR C1

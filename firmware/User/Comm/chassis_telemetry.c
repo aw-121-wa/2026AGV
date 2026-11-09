@@ -11,6 +11,8 @@
 #include "agv_run.h"
 #elif AGV_MODE == AGV_MODE_COMPETITION
 #include "competition.h"
+#elif AGV_MODE == AGV_MODE_ARM
+#include "arm_app.h"
 #endif
 
 /* 纯文本串口输出：串口助手直接可读，不依赖任何上位机程序。 */
@@ -226,6 +228,8 @@ static void PrintStatus(uint32_t now)
 #elif AGV_MODE == AGV_MODE_COMPETITION
     ChassisTelemetry_Printf("          POSE (%s,%s,%s)\r\n", Num(comp.x, 1), Num(comp.y, 1),
                             Num(comp.heading_deg, 2));
+#elif AGV_MODE == AGV_MODE_ARM
+    ArmApp_PrintStatus();
 #endif
 }
 
@@ -285,6 +289,10 @@ void ChassisTelemetry_Help(void)
         "  H or ?   this help\r\n"
         "  /help    console: change parameters live, plot data, bench tools\r\n"
         "  Several moves on one line run in order: F300 L200 B300 R200\r\n");
+#if AGV_MODE == AGV_MODE_ARM
+    ChassisTelemetry_Puts("  ARM mode: the chassis stays stopped (moves and W are refused); "
+                          "the arm is under /help, S stops it\r\n");
+#endif
     ChassisTelemetry_Printf(
         "  Move speed %s mm/s. Replies: OK / BUSY / ERR; 'DONE' when a path finishes.\r\n",
         Num(chassis_tune.cmd_speed, 0));

@@ -48,8 +48,8 @@ static void CarStep(void)
     for (int i = 0; i < 4; ++i)
     {
         wheel_rpm[i] += (u[i] - wheel_rpm[i]) * a;
-        motors[i].speed_rpm = wheel_rpm[i];
-        motors[i].position_deg += wheel_rpm[i] * 6.0f * 0.005f;
+        WheelSpeed(i, wheel_rpm[i]);
+        WheelTurn(i, wheel_rpm[i] * 6.0f * 0.005f);
         v[i] = wheel_rpm[i] * 3.14159265f * CHASSIS_WHEEL_DIA_MM / 60.0f;
     }
     float vx = 0.25f * (v[0] + v[1] + v[2] + v[3]);

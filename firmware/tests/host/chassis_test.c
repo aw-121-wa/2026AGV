@@ -16,13 +16,26 @@
 #include "main.h"
 #include "hwt101.h"
 #include "zdt_x42s.h"
+#include "chassis.h"
 host_dwt host_clock;
 host_debug host_core;
 uint32_t SystemCoreClock = 480000000U;
 static uint32_t ms;
 imu_data imu;
 static zdt_motor motors[4];
-static float output[4]; /* RPM actually commanded to each wheel */
+/* 假电机的读数和收到的命令都按电机自己的方向；车上右侧两台反装（CHASSIS_WHEEL_DIR_xx），
+   output[] 和 WheelTurn/WheelSpeed 换算成轮子让车前进的方向，测试都按轮子写。 */
+static const float wheel_dir[4] = {CHASSIS_WHEEL_DIR_LF, CHASSIS_WHEEL_DIR_RF, CHASSIS_WHEEL_DIR_LR,
+                                   CHASSIS_WHEEL_DIR_RR};
+static float output[4]; /* RPM actually commanded to each wheel, forward positive */
+static void WheelTurn(int i, float wheel_deg)
+{
+    motors[i].position_deg += wheel_dir[i] * wheel_deg;
+}
+static void WheelSpeed(int i, float wheel_rpm)
+{
+    motors[i].speed_rpm = wheel_dir[i] * wheel_rpm;
+}
 static unsigned sync_triggers;
 static int fail_send;
 static uint32_t event_type = HAL_UART_RXEVENT_IDLE;
@@ -65,10 +78,11 @@ HAL_StatusTypeDef ZDT_SetSpeed(zdt_motor *m, int16_t rpm_x10, uint16_t acc, zdt_
     (void)acc;
     if (fail_send)
         return HAL_ERROR;
+    float wheel_rpm = wheel_dir[m->address - 1] * rpm_x10 * 0.1f;
     if (sync == ZDT_SYNC_CACHE)
-        cached[m->address - 1] = rpm_x10 * 0.1f;
+        cached[m->address - 1] = wheel_rpm;
     else
-        output[m->address - 1] = rpm_x10 * 0.1f;
+        output[m->address - 1] = wheel_rpm;
     return HAL_OK;
 }
 HAL_StatusTypeDef ZDT_SyncTrigger(void)
@@ -218,8 +232,8 @@ static void plant(void)
     float v[4];
     for (int i = 0; i < 4; i++)
     {
-        motors[i].speed_rpm = output[i];
-        motors[i].position_deg += output[i] * 6.0f * 0.005f;
+        WheelSpeed(i, output[i]);
+        WheelTurn(i, output[i] * 6.0f * 0.005f);
         v[i] = output[i] * 3.14159265f * CHASSIS_WHEEL_DIA_MM / 60.0f;
     }
     imu.yaw = Math_WrapDeg(imu.yaw + (-v[0] + v[1] - v[2] + v[3]) / (4 * CHASSIS_K_MM) *
@@ -235,7 +249,7 @@ static void complete(void)
 }
 static void sampled_move(void)
 {
-    float position[4];
+    float position[4]; /* 电机自己方向上的读数 */
     for (int i = 0; i < 4; i++)
         position[i] = motors[i].position_deg;
     float x = chassis.pos_x;
@@ -246,7 +260,7 @@ static void sampled_move(void)
         float v[4];
         for (int i = 0; i < 4; i++)
         {
-            position[i] += output[i] * 6.0f * 0.005f;
+            position[i] += wheel_dir[i] * output[i] * 6.0f * 0.005f;
             v[i] = output[i] * 3.14159265f * CHASSIS_WHEEL_DIA_MM / 60.0f;
         }
         imu.yaw = Math_WrapDeg(imu.yaw + (-v[0] + v[1] - v[2] + v[3]) / (4 * CHASSIS_K_MM) *
@@ -259,7 +273,7 @@ static void sampled_move(void)
             for (int i = 0; i < 4; i++)
             {
                 motors[i].position_deg = position[i];
-                motors[i].speed_rpm = output[i];
+                WheelSpeed(i, output[i]);
                 motors[i].position_seq++;
                 motors[i].position_ms = motors[i].speed_ms = motors[i].status_ms = ms;
             }
@@ -438,7 +452,8 @@ int main(void)
         Chassis_SetVelocity(100, 0, 0);
         tick(1);
     }
-    assert(chassis.target.wz < -0.3f && chassis.target.wz > -0.6f);
+    float hold = -(CHASSIS_HEADING_KP + CHASSIS_HEADING_KI * 1.0f) * 0.15f; // 比例 + 积分 1 s
+    assert(chassis.target.wz < 0.7f * hold && chassis.target.wz > 1.3f * hold);
     assert(chassis.wheel_rpm_x10[0] !=
            chassis.wheel_rpm_x10[1]); /* sub-RPM correction reaches wheels */
     Chassis_Stop();
@@ -446,7 +461,7 @@ int main(void)
     int16_t limited[4];
     Chassis_Solve(&combined, limited);
     for (int i = 0; i < 4; i++)
-        assert(abs(limited[i]) <= 4000); /* 0.1 RPM */
+        assert(abs(limited[i]) <= (int)CHASSIS_MAX_WHEEL_RPM * 10); /* 0.1 RPM */
     imu.yaw = 179;
     tick(1);
     assert(Chassis_TurnTo(-179) == HAL_OK);

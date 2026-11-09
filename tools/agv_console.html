@@ -8,8 +8,8 @@
   车载固件的调试界面：用 Chrome 或 Edge 直接打开这个文件，通过 USB 转串口连 STM32 的 USART6（115200）。
   不联网、不依赖任何库；“自动调参”的算法在同一个文件夹的 pid_tune.js。所有数据都来自固件的文本输出
   （README 4.4 节），解析规则集中在 parseLine（调参日志由 pid_tune.js 的 createParser 解析），
-  文本格式由 firmware/tests/host/console_test.c、comp_task_test.c、comp_route_test.c 和
-  survey_loop_test.c 逐字固定。
+  文本格式由 firmware/tests/host/console_test.c、comp_task_test.c、comp_route_test.c、
+  survey_loop_test.c 和 arm_test.c（机械臂页，格式说明在 firmware/User/App/arm_app.h）逐字固定。
   参数列表来自固件的 /list：固件里加参数不用改这里，只是没有中文说明时显示英文名，放在“其他”组。
 -->
 <style>
@@ -101,7 +101,6 @@ header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
 #tabs button:hover { color: var(--text); }
 #tabs button[aria-selected=true] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
 #tabHint { margin-left: 10px; }
-body[data-mode=COMMAND] #tabs [data-ws=task], body[data-mode=COMMAND] #tabs [data-ws=map], body[data-mode=SURVEY] #tabs [data-ws=task] { display: none; }
 main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .workspace { flex: 1; min-height: 0; display: none; gap: 8px; padding: 8px; }
 .workspace.active { display: grid; }
@@ -251,9 +250,36 @@ body[data-mode=SURVEY] #map { cursor: default; }
 .tune-table td.changed { font-weight: 600; }
 pre.macro { margin: 8px 0 0; padding: 6px 8px; background: var(--panel-2); border-radius: 6px; font-size: 12px; overflow-x: auto; }
 
+/* 机械臂 */
+#wsArm { grid-template-columns: 320px minmax(0, 1fr) 360px; }
+#armViewPanel { min-height: 0; }
+#armWrap { position: relative; flex: 1; min-height: 260px; margin: 0 10px 10px; }
+#armCanvas { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: block; border-radius: 6px; cursor: crosshair; touch-action: none; }
+.legend .l-arm { width: 16px; height: 4px; background: var(--text); border-radius: 2px; }
+.legend .l-reach { width: 12px; height: 12px; background: var(--accent); opacity: .25; border-radius: 2px; }
+.legend .l-point { width: 8px; height: 8px; background: var(--s2); transform: rotate(45deg); }
+.jog { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+ol.steps { margin: 0 0 8px; padding-left: 18px; }
+ol.steps li { margin: 2px 0; }
+.arm-points { margin-top: 6px; }
+.pt { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 8px; padding: 5px 0; border-top: 1px solid var(--line); align-items: center; }
+.pt .meta { color: var(--text-3); font-size: 11px; }
+.pt .tag { color: var(--warn); font-size: 11px; margin-left: 4px; }
+.pt .acts { display: flex; gap: 4px; }
+.pt .acts button { padding: 0 8px; min-height: 24px; font-size: 12px; }
+#armSync button { margin-left: 6px; min-height: 24px; padding: 0 8px; font-size: 12px; }
+.color-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.color-chips button { display: inline-flex; align-items: center; gap: 5px; }
+.color-chips i { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(128,128,128,.6); }
+.arm-params { display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 4px 8px; align-items: center; }
+.arm-params label { min-width: 0; }
+.arm-params label small { color: var(--text-3); margin-left: 4px; }
+.arm-params input { width: 84px; text-align: right; }
+
 @media (max-width: 1100px) {
   html, body { height: auto; }
-  #wsDebug, #wsTask, #wsMap, #wsTune { grid-template-columns: minmax(0, 1fr); }
+  #wsDebug, #wsTask, #wsMap, #wsTune, #wsArm { grid-template-columns: minmax(0, 1fr); }
+  #armWrap { flex: none; aspect-ratio: 1 / 1; min-height: 0; }
   #tuneLogs { max-height: 50vh; }
   #paramBody { max-height: 50vh; }
   #plotPanel { min-height: 420px; }
@@ -284,6 +310,7 @@ pre.macro { margin: 8px 0 0; padding: 6px 8px; background: var(--panel-2); borde
   <button role="tab" data-ws="task" aria-selected="false">任务物料</button>
   <button role="tab" data-ws="map" aria-selected="false">地图路径</button>
   <button role="tab" data-ws="tune" aria-selected="false">自动调参</button>
+  <button role="tab" data-ws="arm" aria-selected="false">机械臂</button>
   <span id="tabHint" class="muted small"></span>
 </nav>
 <div id="notice" role="status"></div>
@@ -669,6 +696,148 @@ pre.macro { margin: 8px 0 0; padding: 6px 8px; background: var(--panel-2); borde
       </section>
     </div>
   </div>
+
+  <!-- 机械臂模式（AGV_MODE=3）：底盘锁住不动，标定机械臂、记点位、跟随物料 -->
+  <div id="wsArm" class="workspace">
+    <div class="column scroll-column">
+      <section class="panel">
+        <h2>机械臂
+          <span class="spacer" style="flex:1"></span>
+          <span class="seg">
+            <button id="armHold" class="needs-link" aria-pressed="false" title="电机锁住，接受运动命令">锁住</button>
+            <button id="armFree" class="needs-link" aria-pressed="false" title="松开电机，用手掰着示教。松开后臂没有力，先扶好">松开</button>
+          </span>
+        </h2>
+        <div class="body">
+          <div class="kv">
+            <div><span>J1 大臂 q1 °</span><b id="armQ1Now">--</b></div>
+            <div><span>J2 大臂 q2 °</span><b id="armQ2Now">--</b></div>
+            <div><span>状态</span><b id="armStateNow">--</b></div>
+            <div><span>末端 X mm</span><b id="armXNow">--</b></div>
+            <div><span>末端 Y mm</span><b id="armYNow">--</b></div>
+            <div><span>视觉</span><b id="armVisNow">--</b></div>
+          </div>
+          <div id="armAlarm" class="alarm"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>点动</h2>
+        <div class="body">
+          <div class="inline" style="margin-bottom:6px">
+            <label class="check">关节步长 <select id="armStepQ"><option>0.5</option><option selected>1</option><option>5</option><option>10</option><option>30</option></select> °</label>
+            <label class="check">末端步长 <select id="armStepXY"><option>1</option><option selected>5</option><option>10</option><option>30</option></select> mm</label>
+          </div>
+          <div class="jog">
+            <button class="needs-link arm-move" data-jog="j1" data-sign="1" title="J1 的大臂逆时针（俯视）">J1 +</button>
+            <button class="needs-link arm-move" data-jog="j1" data-sign="-1" title="J1 的大臂顺时针">J1 −</button>
+            <button class="needs-link arm-move" data-jog="j2" data-sign="1" title="J2 的大臂逆时针（俯视）">J2 +</button>
+            <button class="needs-link arm-move" data-jog="j2" data-sign="-1" title="J2 的大臂顺时针">J2 −</button>
+            <button class="needs-link arm-move" data-jog="x" data-sign="1" title="末端往车头方向">前 X+</button>
+            <button class="needs-link arm-move" data-jog="x" data-sign="-1">后 X−</button>
+            <button class="needs-link arm-move" data-jog="y" data-sign="1" title="末端往车左">左 Y+</button>
+            <button class="needs-link arm-move" data-jog="y" data-sign="-1">右 Y−</button>
+          </div>
+          <form id="armJointForm" class="inline" style="margin-top:8px">
+            <label class="check">q1 <input id="armQ1" type="number" step="0.1" value="0"></label>
+            <label class="check">q2 <input id="armQ2" type="number" step="0.1" value="90"></label>
+            <button class="needs-link arm-move" type="submit">到这个角度</button>
+          </form>
+          <form id="armXyForm" class="inline" style="margin-top:6px">
+            <label class="check">X <input id="armX" type="number" step="0.5" value="150"></label>
+            <label class="check">Y <input id="armY" type="number" step="0.5" value="0"></label>
+            <button class="needs-link arm-move" type="submit">到这个位置</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>零点和方向</h2>
+        <div class="body">
+          <ol class="muted small steps">
+            <li>先在下面“几何和限位”里填两台电机的位置、四根臂的长度（量轴心到轴心）。</li>
+            <li>点“松开”，用手把两根大臂摆到认得出的角度，比如都朝车左（90°、90°），俯视逆时针为正、车头方向是 0°。</li>
+            <li>填这两个角度，点“设为零点”。只改参数，臂不会动。</li>
+            <li>锁住后点 J1 +：俯视 J1 的大臂应该逆时针转，反了就勾“J1 反向”；J2 一样。</li>
+            <li>俯视图和实物不像（末端画到了另一边）：点“换一种装配方式”。</li>
+            <li>断电重启一次、臂不动，看关节角变没变：没变，零点一直有效；变了，每次上电都要重标。</li>
+          </ol>
+          <form id="armZeroForm" class="inline">
+            <label class="check">q1 <input id="armZeroQ1" type="number" step="0.1" value="90"></label>
+            <label class="check">q2 <input id="armZeroQ2" type="number" step="0.1" value="90"></label>
+            <button id="armZeroBtn" class="needs-link" type="submit">设为零点</button>
+          </form>
+          <div class="inline" style="margin-top:6px">
+            <label class="check"><input id="armFlip1" type="checkbox" class="needs-link">J1 反向</label>
+            <label class="check"><input id="armFlip2" type="checkbox" class="needs-link">J2 反向</label>
+            <button id="armModeFlip" class="needs-link" title="五连杆的两根小臂能在两个肘连线的哪一边交上：和实物对不上就换">换一种装配方式</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section id="armViewPanel" class="panel">
+      <h2>俯视图（车头朝上）
+        <span class="legend">
+          <span><i class="l-arm"></i>机械臂</span>
+          <span><i class="l-reach"></i>够得着的地方</span>
+          <span><i class="l-point"></i>点位</span>
+        </span>
+        <span class="spacer" style="flex:1"></span>
+        <label class="check" title="打开后点图上一个位置，末端直接走过去；关着时只把坐标填进“到这个位置”"><input id="armClickMove" type="checkbox">点击移动</label>
+        <button id="armTrailClear">清除轨迹</button>
+        <span id="armHover" class="num muted small"></span>
+      </h2>
+      <div id="armWrap"><canvas id="armCanvas" aria-label="机械臂俯视图"></canvas></div>
+    </section>
+
+    <div class="column scroll-column">
+      <section class="panel">
+        <h2>点位 <span id="armPointCount" class="muted small"></span>
+          <span class="spacer" style="flex:1"></span>
+          <button id="armPointsRead" class="needs-link" title="从固件读一遍点位表">读取</button>
+          <button id="armPointsWrite" class="needs-link" title="把这台电脑上的点位都写进固件。断电就没了，定稿后导出 arm_calib.h">全部写入</button>
+        </h2>
+        <div class="body">
+          <form id="armSaveForm" class="inline">
+            <input id="armPointName" type="text" class="mono" placeholder="名字，如 pick1" maxlength="11" autocomplete="off" spellcheck="false" aria-label="点位名字">
+            <button id="armSaveBtn" class="needs-link" type="submit">记录当前位置</button>
+          </form>
+          <p id="armPointMsg" class="small err-text" style="margin:4px 0 0"></p>
+          <div id="armSync" class="alarm"></div>
+          <div id="armPoints" class="arm-points"></div>
+          <div class="inline" style="margin-top:8px">
+            <button id="armExportH" title="生成 firmware/User/Config/arm_calib.h：标定参数和点位，覆盖以后重新编译就是开机默认值，比赛时不接调试台也有">导出 arm_calib.h</button>
+            <button id="armExportJson">导出</button>
+            <button id="armImportJson">导入</button>
+            <input id="armImportFile" type="file" accept=".json,application/json" hidden>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>跟随物料 <span id="armFollowText" class="muted small"></span></h2>
+        <div class="body">
+          <div id="armColors" class="color-chips"></div>
+          <div class="inline" style="margin-top:6px">
+            <button id="armFollowOff" class="needs-link">停止跟随</button>
+          </div>
+          <div class="inline" style="margin-top:8px">
+            <label class="check">相机 <select id="armCam" class="needs-link"><option value="1">装在 J1 那根小臂上</option><option value="2">装在 J2 那根小臂上</option><option value="0">固定在车上</option></select></label>
+            <button id="armCamDir" class="needs-link" title="相机画面上方正好朝车头的时候点">当前小臂方向设为相机正向</button>
+          </div>
+          <p class="muted small" style="margin:6px 0 0">相机装在小臂上（跟着那根小臂转）：把臂移到画面上方正好朝车头（vision 加 --show 看画面），点上面的按钮。固定在车上：填“相机点 X/Y”。位置整体偏大或偏小，查 vision/config.py 的 MM_PER_PX；方向不对，查 CAM_TO_BODY。</p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>几何和限位</h2>
+        <div class="body">
+          <div id="armParams" class="arm-params"><p class="muted small">连上机械臂模式的固件后读取。</p></div>
+        </div>
+      </section>
+    </div>
+  </div>
 </main>
 
 <script src="pid_tune.js"></script>
@@ -716,6 +885,15 @@ const PATTERNS = [
   ['routePoint', /^ROUTE (\d+) (-?\d+) (-?\d+)$/],
   ['routeEnd', /^ROUTE end$/],
   ['routeState', /^ROUTE (\w+)(?: (\w+))?$/],
+  ['armStatus', /^\s+ARM (\w+) q=(\S+),(\S+) xy=(\S+),(\S+) goal=(\S+),(\S+) move=(\d) follow=(\S+)(?: \| (waiting|fault):\s*(.*))?$/],
+  ['armVis', /^\s+VIS (ON|OFF) n=(\d+)(.*)$/],
+  ['armState', /^ARM state (\w+)(?: \| (waiting|fault):\s*(.*))?$/],
+  ['armDone', /^ARM done q=(\S+),(\S+) xy=(\S+),(\S+)$/],
+  ['armFollow', /^ARM follow (\S+)$/],
+  ['armVision', /^ARM vision (ONLINE|OFFLINE)$/],
+  ['armPoint', /^ARM point (\w+) (\S+) (\S+)$/],
+  ['armPoints', /^ARM points (\d+)$/],
+  ['armDeleted', /^OK {3}arm point (\w+) deleted$/],
   ['mode', /^OK {3}mode (\w+)$/],
   ['poseOk', /^OK {3}pose \(/],
   ['banner', /^==== 2026AGV .*mode=(\w+) \| IMU=/],
@@ -898,6 +1076,15 @@ function handleLine(raw) {
     case 'routeList': app.route.buffer = []; app.route.expected = Number(m[1]); if ($('showStatus').checked) logLine(line, 'note'); return;
     case 'routePoint': onRoutePoint(Number(m[1]), Number(m[2]), Number(m[3])); if ($('showStatus').checked) logLine(line, 'note'); return;
     case 'routeEnd': onRouteEnd(); if ($('showStatus').checked) logLine(line, 'note'); return;
+    case 'armStatus': onArmStatus(m); if ($('showStatus').checked) logLine(line, 'note'); return;
+    case 'armVis': onArmVis(m); if ($('showStatus').checked) logLine(line, 'note'); return;
+    case 'armState': onArmState(m[1], m[2] || '', m[3] || ''); break;
+    case 'armDone': onArmDone(m); break;
+    case 'armFollow': armView.follow = m[1]; renderArm(); break;
+    case 'armVision': armView.vision = m[1] === 'ONLINE'; renderArm(); break;
+    case 'armPoint': onArmPoint(m[1], Number(m[2]), Number(m[3])); break;
+    case 'armPoints': onArmPointsEnd(); break;
+    case 'armDeleted': onArmDeleted(m[1]); break;
     case 'param': onParam(m); break;
     case 'setOk': onSetOk(m); break;
     case 'setErr': onSetFail(m[1], line.slice(5)); break;
@@ -938,8 +1125,9 @@ function onBoot(mode) {
   resetRun();
   resetParams();
   setMode(mode);
-  send('D5');
+  send(mode === 'ARM' ? 'D10' : 'D5');
   send('/list');
+  if (mode === 'ARM') readArmPoints(); // 重启后固件里只剩 arm_calib.h 的点位
   if (plot.group) send(`/plot ${plot.group} ${plot.hz}`);
   tune.parser?.reset();
   stopTuneTest('固件重启了');
@@ -949,6 +1137,8 @@ function onBoot(mode) {
 /* 这一局的数据：连接或固件重启时清掉，断开时留着看。 */
 function resetRun() {
   Object.assign(app, { obstacles: [], obsBuffer: [], pose: null, trace: [], scanPoints: [], picked: null, scan: '', route: { state: 'none', why: '', points: [], buffer: null, expected: 0, retried: false } });
+  Object.assign(armView, { state: '', kind: '', why: '', q: null, xy: null, goal: null, moving: false, follow: 'off', vision: false, materials: [], fw: null, fwBuffer: null, trail: [] });
+  renderArm();
   setTask('', '');
   renderScan();
   renderRoute();
@@ -958,26 +1148,29 @@ function resetRun() {
 function resetParams() {
   params.clear();
   $('paramBody').replaceChildren();
+  $('armParams').replaceChildren(el('p', 'muted small', '连上机械臂模式的固件后读取。'));
 }
 
-const MODE_NAMES = { COMMAND: '指令', SURVEY: '巡检', COMPETITION: '比赛' };
-/* 每个模式能用的工作区：调试台三个模式共用。没连接时都能打开看。 */
-const WORKSPACES = { '': ['debug', 'task', 'map', 'tune'], COMMAND: ['debug', 'tune'], SURVEY: ['debug', 'map', 'tune'], COMPETITION: ['debug', 'task', 'map', 'tune'] };
+const MODE_NAMES = { COMMAND: '指令', SURVEY: '巡检', COMPETITION: '比赛', ARM: '机械臂' };
+/* 每个模式能用的工作区：调试台各模式共用；机械臂模式底盘锁住，没有自动调参。没连接时都能打开看。 */
+const WORKSPACES = { '': ['debug', 'task', 'map', 'tune', 'arm'], COMMAND: ['debug', 'tune'], SURVEY: ['debug', 'map', 'tune'], COMPETITION: ['debug', 'task', 'map', 'tune'], ARM: ['debug', 'arm'] };
 const TAB_HINTS = {
-  '': '没连接：三个工作区都能打开看，连上后按固件的模式显示',
-  COMMAND: '指令模式只用调试台；任务物料和地图路径要烧比赛模式固件（AGV_MODE=2）',
+  '': '没连接：所有工作区都能打开看，连上后按固件的模式显示',
+  COMMAND: '指令模式只用调试台；任务物料和地图路径要烧比赛模式固件（AGV_MODE=2），机械臂要烧 AGV_MODE=3',
   SURVEY: '巡检模式没有任务码，地图上是整圈路线',
   COMPETITION: '',
+  ARM: '机械臂模式：底盘锁住不动，移动命令固件都不收',
 };
 
 function showWorkspace(name) {
   app.workspace = name;
-  for (const [ws, id] of [['debug', 'wsDebug'], ['task', 'wsTask'], ['map', 'wsMap'], ['tune', 'wsTune']])
+  for (const [ws, id] of [['debug', 'wsDebug'], ['task', 'wsTask'], ['map', 'wsMap'], ['tune', 'wsTune'], ['arm', 'wsArm']])
     $(id).classList.toggle('active', ws === name);
   document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.ws === name)));
   plot.dirty = true;
   drawMap();
   drawTuneChart();
+  drawArm();
 }
 
 function updateModePill() {
@@ -992,7 +1185,10 @@ function setMode(mode) {
   app.mode = mode;
   document.body.dataset.mode = mode;
   updateModePill();
-  if (!(WORKSPACES[mode] || WORKSPACES['']).includes(app.workspace)) showWorkspace('debug');
+  const tabs = WORKSPACES[mode] || WORKSPACES[''];
+  document.querySelectorAll('#tabs [data-ws]').forEach(b => { b.hidden = !tabs.includes(b.dataset.ws); });
+  if (mode === 'ARM' && changed) showWorkspace('arm');
+  else if (!tabs.includes(app.workspace)) showWorkspace('debug');
   $('tabHint').textContent = TAB_HINTS[mode] ?? '';
   updateLocks();
   renderRoute();
@@ -1000,20 +1196,22 @@ function setMode(mode) {
   /* 识别结果固件只主动说一次，中途连上的要问一次。 */
   if (mode === 'COMPETITION') { send('/run'); send('/obs'); send('/task'); send('/route'); }
   if (mode === 'SURVEY') send('/route');
+  if (mode === 'ARM') { send('D10'); readArmPoints(); } // 机械臂的状态 10 Hz 刷新
 }
 
 /* 比赛流程运行中固件只接受急停（规则禁止遥控），这里把改东西的控件一起锁住。 */
 function updateLocks() {
   document.querySelectorAll('.run-lock').forEach(b => { b.disabled = !app.port || app.running; });
   document.querySelectorAll('[data-move],[data-turn],#headingZero,#wheelTest').forEach(b => {
-    b.disabled = !app.port || app.mode === 'SURVEY' || app.running;
-    b.title = app.mode === 'SURVEY' ? '巡检模式路线固定，不接受手动运动' : app.running ? '比赛流程运行中，只能急停' : '';
+    b.disabled = !app.port || app.mode === 'SURVEY' || app.mode === 'ARM' || app.running;
+    b.title = app.mode === 'SURVEY' ? '巡检模式路线固定，不接受手动运动' : app.mode === 'ARM' ? '机械臂模式底盘一直停着，不接受移动' : app.running ? '比赛流程运行中，只能急停' : '';
   });
   $('startBtn').disabled = !app.port || app.running;
   $('taskSubmit').disabled = app.running;
   $('visionColor').disabled = !app.port || app.running;
   updateParamEnabled();
   updateTuneButtons();
+  updateArmButtons();
 }
 
 const RUN_STATES = { idle: '等启动', scan: '停车扫描', plan: '规划路线', move: '开往下一处', turn: '板前转向', wait: '沿板找码', done: '开局完成', stopped: '已停止', failed: '失败' };
@@ -1043,6 +1241,7 @@ const GROUPS = [
   ['motion', '速度与加速度'],
   ['calib', '机械标定（只能停车改）'],
   ['lidar', '雷达（下一个雷达点生效，舵机角度马上转过去）'],
+  ['arm', '机械臂（马上生效；零点、方向改了臂也不会跳）'],
   ['other', '其他'],
 ];
 const PARAM_INFO = {
@@ -1072,6 +1271,31 @@ const PARAM_INFO = {
   obs_confirm: ['确认圈数', 'lidar', '圈', '连续命中多少圈才确认'],
   servo_scan: ['舵机伸出', 'lidar', '°', '扫描时舵机转到这里，把雷达伸出去；/scan 能直接看'],
   servo_stow: ['舵机收回', 'lidar', '°', '平时和开动时舵机在这里，雷达收在车身里；改了马上转过去'],
+  arm_j1_x: ['J1 电机 X', 'arm', 'mm', 'J1 电机轴在车体系的位置，车头方向为正'],
+  arm_j1_y: ['J1 电机 Y', 'arm', 'mm', 'J1 电机轴在车体系的位置，车左方向为正'],
+  arm_j2_x: ['J2 电机 X', 'arm', 'mm', 'J2 电机轴在车体系的位置'],
+  arm_j2_y: ['J2 电机 Y', 'arm', 'mm', 'J2 电机轴在车体系的位置'],
+  arm_a1: ['J1 大臂', 'arm', 'mm', 'J1 电机轴到 J1 这边的肘'],
+  arm_b1: ['J1 小臂', 'arm', 'mm', 'J1 这边的肘到末端'],
+  arm_a2: ['J2 大臂', 'arm', 'mm', 'J2 电机轴到 J2 这边的肘'],
+  arm_b2: ['J2 小臂', 'arm', 'mm', 'J2 这边的肘到末端'],
+  arm_mode: ['装配方式', 'arm', '', '从 J1 的肘看向 J2 的肘，末端在左边 0、右边 1；俯视图和实物对不上就换'],
+  arm_margin: ['死点余量', 'arm', '°', '两根小臂成一条线是死点（电机管不住末端），目标和一路上至少离它这么多'],
+  arm_zero1: ['J1 零点', 'arm', '°', 'J1 大臂角为 0 时电机的读数；用“机械臂”页的“设为零点”标'],
+  arm_zero2: ['J2 零点', 'arm', '°', 'J2 大臂角为 0 时电机的读数'],
+  arm_flip1: ['J1 反向', 'arm', '', '1 = 电机正转时 J1 大臂顺时针转'],
+  arm_flip2: ['J2 反向', 'arm', '', '1 = 电机正转时 J2 大臂顺时针转'],
+  arm_q1_min: ['J1 下限', 'arm', '°', 'J1 大臂相对车头'],
+  arm_q1_max: ['J1 上限', 'arm', '°', 'J1 大臂相对车头'],
+  arm_q2_min: ['J2 下限', 'arm', '°', 'J2 大臂相对车头'],
+  arm_q2_max: ['J2 上限', 'arm', '°', 'J2 大臂相对车头'],
+  arm_speed: ['关节速度', 'arm', '°/s', '两台电机的最大角速度，下一次运动生效'],
+  arm_acc: ['关节加速度', 'arm', '°/s²', '起步和刹车，下一次运动生效'],
+  arm_cam: ['相机装在', 'arm', '', '0 = 固定在车上，1 = J1 那根小臂上，2 = J2 那根小臂上'],
+  arm_cam_rot: ['相机方向', 'arm', '°', '装在小臂上：那根小臂朝这个方向时画面上方朝车头；固定：画面再转这么多'],
+  arm_cam_x: ['相机点 X', 'arm', 'mm', '相机固定在车上时，画面 TARGET_PX 那一点在车体系的位置'],
+  arm_cam_y: ['相机点 Y', 'arm', 'mm', '相机固定在车上时，画面 TARGET_PX 那一点在车体系的位置'],
+  arm_cam_lag: ['视觉延迟', 'arm', 'ms', '拍照到单片机收到物料帧，跟随时按拍照那一刻的姿态换算'],
 };
 
 let listTimer = 0;
@@ -1157,6 +1381,7 @@ function renderParam(p) {
   const locked = !app.port || app.running || (p.stoppedOnly && app.moving);
   p.number.disabled = p.slider.disabled = locked;
   if (p.stoppedOnly && !app.port) p.resetBtn.disabled = true;
+  if (p.name.startsWith('arm_')) renderArmParam(p);
 }
 
 function updateParamEnabled() {
@@ -1476,11 +1701,12 @@ const css = {};
 
 function readColors() {
   const s = getComputedStyle(document.documentElement);
-  for (const k of ['grid', 'axis', 'text-2', 'text-3', 'panel', 'text']) css[k] = s.getPropertyValue('--' + k).trim();
+  for (const k of ['grid', 'axis', 'text-2', 'text-3', 'panel', 'panel-2', 'text', 'line', 'accent', 'warn']) css[k] = s.getPropertyValue('--' + k).trim();
   css.series = [1, 2, 3, 4, 5, 6, 7, 8].map(i => s.getPropertyValue('--s' + i).trim());
   plot.dirty = true;
   drawMap();
   buildLegend();
+  drawArm();
 }
 
 function setPlotActive(group) {
@@ -2464,6 +2690,566 @@ function updateTuneButtons() {
 }
 
 /* ---------- 终端 ---------- */
+/* ---------- 机械臂（AGV_MODE=3）：状态、点动、零点、点位、跟随；俯视图是车体系，车头朝上 ---------- */
+const ARM_POINTS_KEY = 'agv-console.arm.points';
+const ARM_COLOR_NAMES = ['', 'red', 'yellow', 'blue', 'green', 'black', 'lightblue']; // 固件的颜色名，编号同 MATERIALS
+const ARM_STATES = { WAIT: '等电机', READY: '锁住', FREE: '松开，可以手掰', FAULT: '故障' };
+const ARM_FOLLOW = { looking: '在找', tracking: '跟着', far: '够不着，停在最近的地方' };
+const ARM_WHY = [['no feedback', '没有反馈'], ['not enabled', '没使能'], ['stall', '堵转'], ['(send S)', '（按“急停 / 清故障”）']];
+/* 没读到固件参数（没连接）时，画图按 arm_calib.h 的默认值。 */
+const ARM_DEFAULTS = { arm_j1_x: -95, arm_j1_y: 0, arm_j2_x: 95, arm_j2_y: 0, arm_a1: 140, arm_b1: 235, arm_a2: 140, arm_b2: 235, arm_mode: 1, arm_margin: 10, arm_q1_min: -170, arm_q1_max: 170, arm_q2_min: -170, arm_q2_max: 170 };
+const ARM_PARAM_ROWS = ['arm_j1_x', 'arm_j1_y', 'arm_j2_x', 'arm_j2_y', 'arm_a1', 'arm_b1', 'arm_a2', 'arm_b2', 'arm_margin', 'arm_q1_min', 'arm_q1_max', 'arm_q2_min', 'arm_q2_max', 'arm_speed', 'arm_acc', 'arm_zero1', 'arm_zero2', 'arm_cam_rot', 'arm_cam_x', 'arm_cam_y', 'arm_cam_lag'];
+/* arm_calib.h 的宏，顺序和注释同固件里那个文件：参数名、宏名、整数（i）还是浮点（f）、注释。 */
+const ARM_MACROS = [
+  ['arm_j1_x', 'ARM_J1_X_MM', 'f', 'J1 电机轴在车体系的位置'],
+  ['arm_j1_y', 'ARM_J1_Y_MM', 'f', ''],
+  ['arm_j2_x', 'ARM_J2_X_MM', 'f', 'J2 电机轴'],
+  ['arm_j2_y', 'ARM_J2_Y_MM', 'f', ''],
+  ['arm_a1', 'ARM_A1_MM', 'f', 'J1 的大臂：电机轴到肘'],
+  ['arm_b1', 'ARM_B1_MM', 'f', 'J1 那边的小臂：肘到末端'],
+  ['arm_a2', 'ARM_A2_MM', 'f', ''],
+  ['arm_b2', 'ARM_B2_MM', 'f', ''],
+  ['arm_mode', 'ARM_MODE', 'i', '从 J1 的肘看向 J2 的肘，末端在左边是 0、右边是 1'],
+  ['arm_margin', 'ARM_MARGIN_DEG', 'f', '离死点（两根小臂成一条线）至少这么多度'],
+  ['arm_zero1', 'ARM_ZERO1_DEG', 'f', '关节角为 0 时电机的读数（/arm zero 标定）'],
+  ['arm_zero2', 'ARM_ZERO2_DEG', 'f', ''],
+  ['arm_flip1', 'ARM_FLIP1', 'i', '1 = 电机正转时大臂顺时针转'],
+  ['arm_flip2', 'ARM_FLIP2', 'i', ''],
+  ['arm_q1_min', 'ARM_Q1_MIN_DEG', 'f', '关节限位'],
+  ['arm_q1_max', 'ARM_Q1_MAX_DEG', 'f', ''],
+  ['arm_q2_min', 'ARM_Q2_MIN_DEG', 'f', ''],
+  ['arm_q2_max', 'ARM_Q2_MAX_DEG', 'f', ''],
+  ['arm_speed', 'ARM_SPEED_DEG_S', 'f', '关节最大角速度'],
+  ['arm_acc', 'ARM_ACC_DEG_S2', 'f', '关节角加速度'],
+  ['arm_cam', 'ARM_CAM', 'i', '相机：0 = 固定在车上，1 = 装在 J1 那根小臂上，2 = 装在 J2 那根小臂上'],
+  ['arm_cam_rot', 'ARM_CAM_ROT_DEG', 'f', '装在小臂上：那根小臂（肘指向末端）朝这个方向时画面的“前/左”就是车头/车左'],
+  ['arm_cam_x', 'ARM_CAM_X_MM', 'f', '相机固定在车上时，画面 TARGET_PX 那一点在车体系的位置'],
+  ['arm_cam_y', 'ARM_CAM_Y_MM', 'f', ''],
+  ['arm_cam_lag', 'ARM_CAM_LAG_MS', 'f', '拍照到单片机收到物料帧的延迟'],
+];
+const ROBOT_MM = 270; // 车身，同 map.h 的 ROBOT_LENGTH_MM × ROBOT_WIDTH_MM
+const START_MM = 300; // 出发前要收在 300 mm 见方里
+const POINT_NAME = /^[a-z][a-z0-9_]{0,10}$/;
+const armView = { state: '', kind: '', why: '', q: null, xy: null, goal: null, moving: false, follow: 'off', vision: false, materials: [], fw: null, fwBuffer: null, trail: [], points: {}, hover: null, shade: null, shadeKey: '', toBody: null };
+
+const wrapDeg = a => ((a + 180) % 360 + 360) % 360 - 180;
+
+function armGeometry() {
+  const v = name => (params.has(name) ? params.get(name).value : ARM_DEFAULTS[name]);
+  return {
+    j: [[v('arm_j1_x'), v('arm_j1_y')], [v('arm_j2_x'), v('arm_j2_y')]], a: [v('arm_a1'), v('arm_a2')], b: [v('arm_b1'), v('arm_b2')],
+    mode: v('arm_mode'), margin: v('arm_margin'), lo: [v('arm_q1_min'), v('arm_q2_min')], hi: [v('arm_q1_max'), v('arm_q2_max')],
+  };
+}
+
+/* 五连杆，同固件 arm.c：两根大臂各自转，两根小臂在末端交上（两圆交点按 arm_mode 选）。 */
+function armElbows(g, q) {
+  return [0, 1].map(i => [g.j[i][0] + g.a[i] * Math.cos(q[i] * Math.PI / 180), g.j[i][1] + g.a[i] * Math.sin(q[i] * Math.PI / 180)]);
+}
+function armForward(g, q) {
+  const [e1, e2] = armElbows(g, q), dx = e2[0] - e1[0], dy = e2[1] - e1[1], d = Math.hypot(dx, dy);
+  if (!(d > Math.abs(g.b[0] - g.b[1]) && d < g.b[0] + g.b[1] && d > 1e-3)) return null; // 合不拢
+  const along = (g.b[0] ** 2 - g.b[1] ** 2 + d * d) / (2 * d);
+  const h = Math.sqrt(Math.max(g.b[0] ** 2 - along ** 2, 0)) * (g.mode >= 0.5 ? -1 : 1);
+  return [e1[0] + (along * dx - h * dy) / d, e1[1] + (along * dy + h * dx) / d];
+}
+const armInLimits = (g, q) => q.every((v, i) => v >= g.lo[i] && v <= g.hi[i]);
+/* 离死点（两根小臂成一条线）还有多少度；超限位或合不拢是 -1。大小臂拉直只是够得着的边，不算。 */
+function armClearance(g, q) {
+  const p = armInLimits(g, q) && armForward(g, q);
+  if (!p) return -1;
+  const [e1, e2] = armElbows(g, q), ax = e1[0] - p[0], ay = e1[1] - p[1], bx = e2[0] - p[0], by = e2[1] - p[1];
+  const t = Math.abs(Math.atan2(ax * by - ay * bx, ax * bx + ay * by)) * 180 / Math.PI;
+  return Math.min(t, 180 - t);
+}
+/* 逆解：每根大臂两支，四种组合里挑合得拢到 (x, y)、离死点够远、离 near 最近的；没有返回 null。 */
+function armInverse(g, x, y, near) {
+  const branch = [];
+  for (const i of [0, 1]) {
+    const dx = x - g.j[i][0], dy = y - g.j[i][1], r = Math.hypot(dx, dy);
+    const c = (g.a[i] ** 2 + r * r - g.b[i] ** 2) / (2 * g.a[i] * r);
+    if (!(r > 1e-3 && c >= -1 && c <= 1)) return null;
+    const toward = Math.atan2(dy, dx), spread = Math.acos(c);
+    branch.push([wrapDeg((toward + spread) * 180 / Math.PI), wrapDeg((toward - spread) * 180 / Math.PI)]);
+  }
+  let best = null, cost = Infinity;
+  for (const q1 of branch[0])
+    for (const q2 of branch[1]) {
+      const q = [q1, q2], p = armForward(g, q);
+      if (!p || Math.hypot(p[0] - x, p[1] - y) > 0.5 || armClearance(g, q) < g.margin) continue;
+      const c = near ? Math.abs(q1 - near[0]) + Math.abs(q2 - near[1]) : 0;
+      if (c < cost) { cost = c; best = q; }
+    }
+  return best;
+}
+
+function armWhy(text) {
+  for (const [en, zh] of ARM_WHY) text = text.split(en).join(zh);
+  return text.trim();
+}
+
+function onArmStatus(m) {
+  Object.assign(armView, {
+    state: m[1], q: [Number(m[2]), Number(m[3])], xy: [Number(m[4]), Number(m[5])], goal: [Number(m[6]), Number(m[7])],
+    moving: m[8] === '1', follow: m[9], kind: m[10] || '', why: m[11] || '',
+  });
+  const last = armView.trail[armView.trail.length - 1];
+  if (armView.xy.every(Number.isFinite) && (!last || Math.hypot(last[0] - armView.xy[0], last[1] - armView.xy[1]) > 0.5)) {
+    armView.trail.push(armView.xy);
+    if (armView.trail.length > 400) armView.trail.shift();
+  }
+  renderArm();
+}
+
+function onArmVis(m) {
+  armView.vision = m[1] === 'ON';
+  armView.materials = [...m[3].matchAll(/(\w+):(-?[\d.]+),(-?[\d.]+)/g)]
+    .map(r => ({ color: ARM_COLOR_NAMES.indexOf(r[1]), x: Number(r[2]), y: Number(r[3]) }));
+  renderArm();
+}
+
+function onArmState(state, kind, why) {
+  Object.assign(armView, { state, kind, why });
+  renderArm();
+}
+
+function onArmDone(m) {
+  armView.goal = [Number(m[1]), Number(m[2])];
+  armView.moving = false;
+  renderArm();
+}
+
+/* ---- 点位：这台电脑上存一份（localStorage），固件里有一张表（断电剩 arm_calib.h 里的） ---- */
+function loadArmPoints() {
+  try {
+    const p = JSON.parse(localStorage.getItem(ARM_POINTS_KEY));
+    return p && typeof p === 'object' && !Array.isArray(p) ? p : {};
+  } catch { return {}; }
+}
+function storeArmPoints(points) {
+  try { localStorage.setItem(ARM_POINTS_KEY, JSON.stringify(points)); } catch { /* 无痕窗口存不了，只是刷新页面后要从固件读 */ }
+}
+const samePoint = (a, b) => Boolean(a && b) && Math.abs(a[0] - b[0]) < 0.006 && Math.abs(a[1] - b[1]) < 0.006;
+const pointLine = (name, q) => `/arm point ${name} ${q[0].toFixed(2)} ${q[1].toFixed(2)}`;
+
+function readArmPoints() {
+  armView.fwBuffer = new Map();
+  send('/arm points');
+}
+
+/* 固件认了一个点位（记录、写入的回复，或者列表里的一项）。 */
+function onArmPoint(name, q1, q2) {
+  if (armView.fwBuffer) {
+    armView.fwBuffer.set(name, [q1, q2]);
+    return;
+  }
+  armView.fw?.set(name, [q1, q2]);
+  const local = loadArmPoints();
+  local[name] = [q1, q2];
+  storeArmPoints(local);
+  renderArmPoints();
+}
+
+/* 列表收完：固件里有、这里没有的记下来；这里有、固件里没有或者不一样的，点位面板里提示写进去。 */
+function onArmPointsEnd() {
+  const fw = armView.fwBuffer || new Map();
+  armView.fw = fw;
+  armView.fwBuffer = null;
+  const local = loadArmPoints();
+  for (const [name, q] of fw) if (!local[name]) local[name] = q;
+  storeArmPoints(local);
+  renderArmPoints();
+}
+
+const unsavedArmPoints = () => {
+  const fw = armView.fw || new Map();
+  return Object.entries(loadArmPoints()).filter(([name, q]) => !samePoint(fw.get(name), q));
+};
+
+function onArmDeleted(name) {
+  armView.fw?.delete(name);
+  const local = loadArmPoints();
+  delete local[name];
+  storeArmPoints(local);
+  renderArmPoints();
+}
+
+function deleteArmPoint(name) {
+  if (!confirm(`删除点位 ${name}？`)) return;
+  const local = loadArmPoints();
+  delete local[name];
+  storeArmPoints(local);
+  if (armView.fw?.has(name)) send(`/arm del ${name}`);
+  renderArmPoints();
+}
+
+function writeArmPoints() {
+  const lines = unsavedArmPoints().map(([name, q]) => pointLine(name, q));
+  if (lines.length) sendAll(lines);
+  else showNotice('固件里的点位和这台电脑上的一样，不用写。');
+}
+
+async function saveArmPoint() {
+  const name = $('armPointName').value.trim().toLowerCase();
+  if (!POINT_NAME.test(name)) {
+    setText('armPointMsg', '名字用小写字母、数字、下划线，字母开头，最长 11 个字');
+    return;
+  }
+  if (loadArmPoints()[name] && !confirm(`点位 ${name} 已经有了，用臂现在的位置覆盖？`)) return;
+  setText('armPointMsg', '');
+  if (!send(`/arm save ${name}`)) return;
+  const reply = await waitLine(/^(ARM point |ERR {2}arm|BUSY arm)/, 1500);
+  if (!reply) setText('armPointMsg', '固件没回复，检查是不是机械臂模式的固件');
+  else if (!reply.startsWith('ARM point')) setText('armPointMsg', reply.replace(/^(ERR|BUSY)\s+(arm:?\s*)?/, ''));
+  else $('armPointName').value = '';
+}
+
+function renderArmPoints() {
+  const local = loadArmPoints(), fw = armView.fw, g = armGeometry();
+  armView.points = local;
+  const names = [...new Set([...Object.keys(local), ...(fw ? fw.keys() : [])])].sort();
+  const list = $('armPoints');
+  list.replaceChildren();
+  setText('armPointCount', names.length ? `${names.length} 个` : '');
+  const unsaved = fw && app.port ? unsavedArmPoints().length : 0, sync = $('armSync');
+  sync.className = 'alarm' + (unsaved ? ' wait' : '');
+  sync.replaceChildren();
+  $('armPointsWrite').classList.toggle('primary', unsaved > 0);
+  if (unsaved) {
+    const fwOnly = el('button', '', '以固件为准');
+    fwOnly.title = '丢掉这台电脑上固件里没有的点位';
+    fwOnly.addEventListener('click', () => { storeArmPoints(Object.fromEntries(armView.fw)); renderArmPoints(); });
+    sync.append(`${unsaved} 个点位固件里没有或者不一样（固件重启后只剩 arm_calib.h 里的），点上面“全部写入”。`, fwOnly);
+  }
+  if (!names.length)
+    list.append(el('p', 'muted small', '还没有点位。把臂移到要记的地方（点动，或者松开用手掰），起个名字点“记录当前位置”。'));
+  for (const name of names) {
+    const q = local[name] || fw.get(name), p = armForward(g, q);
+    const info = el('div');
+    info.append(el('b', 'num', name));
+    if (fw && !fw.has(name)) info.append(el('span', 'tag', '固件里没有'));
+    else if (fw && !samePoint(fw.get(name), q)) info.append(el('span', 'tag', '和固件不一样'));
+    info.append(el('div', 'meta num', `q ${q[0].toFixed(2)}°, ${q[1].toFixed(2)}° · ` + (p ? `(${p[0].toFixed(1)}, ${p[1].toFixed(1)}) mm` : '按现在的尺寸合不拢')));
+    const go = el('button', 'arm-move', '去');
+    go.title = '按记下的关节角走过去';
+    go.addEventListener('click', () => send(`/arm j ${q[0].toFixed(2)} ${q[1].toFixed(2)}`));
+    const over = el('button', 'arm-over', '覆盖');
+    over.title = '用臂现在的位置覆盖';
+    over.addEventListener('click', () => { if (confirm(`用臂现在的位置覆盖点位 ${name}？`)) send(`/arm save ${name}`); });
+    const del = el('button', '', '删');
+    del.addEventListener('click', () => deleteArmPoint(name));
+    const acts = el('div', 'acts');
+    acts.append(go, over, del);
+    const row = el('div', 'pt');
+    row.append(info, acts);
+    list.append(row);
+  }
+  updateArmButtons();
+  drawArm();
+}
+
+function exportArmPoints() {
+  downloadText('agv_arm_points.json', JSON.stringify({ format: 'agv-arm-points', version: 1, points: loadArmPoints() }, null, 2), 'application/json');
+}
+
+async function importArmPoints(file) {
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+    if (data?.format !== 'agv-arm-points' || !data.points || typeof data.points !== 'object') throw new Error('不是点位文件');
+  } catch (e) {
+    showNotice('导入失败：' + e.message);
+    return;
+  }
+  const local = loadArmPoints();
+  let n = 0;
+  for (const [name, q] of Object.entries(data.points))
+    if (POINT_NAME.test(name) && Array.isArray(q) && q.length === 2 && q.every(Number.isFinite)) { local[name] = q; ++n; }
+  storeArmPoints(local);
+  renderArmPoints();
+  showNotice(`导入了 ${n} 个点位。` + (app.port && app.mode === 'ARM' ? '要写进固件点“全部写入”。' : ''));
+}
+
+/* 整个 firmware/User/Config/arm_calib.h：现在的参数和这台电脑上的点位。 */
+function exportArmCalib() {
+  const now = new Date(), pad = n => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const lines = [
+    '#ifndef ARM_CALIB_H', '#define ARM_CALIB_H', '',
+    '/* 机械臂的开机默认值：调试台“机械臂”页的“导出 arm_calib.h”生成整个文件，覆盖这里再编译，',
+    '   不接调试台（比赛）时用的就是这些。现场先用 /set arm_* 和 /arm 命令调，调好了再导出；手改也行。',
+    '   并联 SCARA（平面五连杆）：J1、J2 两台电机各带一根大臂，两根小臂在末端（夹爪）铰在一起，中间的',
+    '   关节都是被动的。关节角 q1、q2 = 两根大臂相对车头的角度，俯视逆时针为正，度。',
+    `   车体系：x 朝车头、y 朝左，原点是底盘中心，mm。这一份由调试台导出于 ${stamp}。 */`, '',
+  ];
+  for (const [name, macro, kind, note] of ARM_MACROS) {
+    let text = params.get(name).text;
+    if (kind === 'i') text = String(Math.round(Number(text)));
+    else text = (text.includes('.') ? text : text + '.0') + 'f';
+    lines.push(`#define ${macro.padEnd(15)} ${text}${note ? ' // ' + note : ''}`);
+  }
+  const points = Object.entries(loadArmPoints()).sort(([a], [b]) => a.localeCompare(b));
+  lines.push('', '/* 命名点位（关节角）：ARM_POINT(名字, q1, q2)，一行一个、行尾加反斜杠；名字用小写字母、数字、',
+    '   下划线，字母开头，最长 11 个字。 */');
+  if (!points.length) lines.push('#define ARM_POINT_TABLE');
+  else {
+    lines.push('#define ARM_POINT_TABLE \\');
+    points.forEach(([name, q], i) => lines.push(`    ARM_POINT(${name}, ${q[0].toFixed(2)}f, ${q[1].toFixed(2)}f)${i < points.length - 1 ? ' \\' : ''}`));
+  }
+  lines.push('', '#endif', '');
+  downloadText('arm_calib.h', lines.join('\n'), 'text/x-c');
+}
+
+/* ---- 参数：调试台页的参数面板里也有，这里只放几何、限位、速度、相机几项 ---- */
+function buildArmParams() {
+  const box = $('armParams');
+  box.replaceChildren();
+  for (const name of ARM_PARAM_ROWS) {
+    if (!params.has(name)) continue;
+    const info = PARAM_INFO[name];
+    const label = el('label', '', info[0]);
+    label.append(el('small', '', info[2]));
+    label.title = info[3];
+    const input = el('input');
+    input.type = 'number';
+    input.id = 'armParam-' + name;
+    input.value = params.get(name).text; // /list 时一项一项来，后来的会让这里重建
+    label.htmlFor = input.id;
+    input.addEventListener('change', () => {
+      const p = params.get(name);
+      commitParam(p, input.value);
+      if (!p.pending) input.value = p.text; // 超范围没发出去：显示回原值，原因在调试台页的参数面板
+    });
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
+    box.append(label, input);
+  }
+}
+
+function renderArmParam(p) {
+  if (p.name === 'arm_flip1' || p.name === 'arm_flip2') $(p.name === 'arm_flip1' ? 'armFlip1' : 'armFlip2').checked = p.value >= 0.5;
+  else if (p.name === 'arm_cam') $('armCam').value = String(Math.round(p.value));
+  else if (p.name === 'arm_mode') { armView.shadeKey = ''; renderArmPoints(); }
+  else if (ARM_PARAM_ROWS.includes(p.name)) {
+    if (!$('armParam-' + p.name)) buildArmParams();
+    const input = $('armParam-' + p.name);
+    if (document.activeElement !== input) input.value = p.text;
+    input.min = p.min;
+    input.max = p.max;
+    input.step = 10 ** -p.decimals;
+    input.disabled = !app.port;
+    renderArmPoints(); // 臂长、底座变了，点位的 (x, y) 跟着变
+  }
+  updateArmButtons();
+}
+
+/* ---- 面板和按钮 ---- */
+function renderArm() {
+  const st = armView.state, q = armView.q, xy = armView.xy;
+  setText('armStateNow', st ? (ARM_STATES[st] || st) + (armView.moving ? '，在走' : '') : '--');
+  setText('armQ1Now', q ? q[0].toFixed(2) : '--');
+  setText('armQ2Now', q ? q[1].toFixed(2) : '--');
+  const fits = xy && xy.every(Number.isFinite); // nan = 按现在的尺寸合不拢
+  setText('armXNow', fits ? xy[0].toFixed(1) : xy ? '合不拢' : '--');
+  setText('armYNow', fits ? xy[1].toFixed(1) : xy ? '合不拢' : '--');
+  setText('armVisNow', !st ? '--' : armView.vision ? `在线 · ${armView.materials.length} 个物料` : '离线');
+  const alarm = $('armAlarm');
+  alarm.className = 'alarm' + (st === 'FAULT' ? ' fault' : st === 'WAIT' ? ' wait' : '');
+  alarm.textContent = st === 'FAULT' ? '故障：' + armWhy(armView.why) : st === 'WAIT' ? '等待：' + (armWhy(armView.why) || '电机') : '';
+  $('armHold').setAttribute('aria-pressed', String(st === 'READY'));
+  $('armFree').setAttribute('aria-pressed', String(st === 'FREE'));
+  const [color, how] = armView.follow.split(':');
+  const colorIndex = ARM_COLOR_NAMES.indexOf(color);
+  setText('armFollowText', armView.follow === 'off' ? '' : `${MATERIALS[colorIndex]?.[0] || color} · ${ARM_FOLLOW[how] || how}`);
+  document.querySelectorAll('#armColors button').forEach(b => b.setAttribute('aria-pressed', String(armView.follow !== 'off' && b.dataset.color === color)));
+  updateArmButtons();
+  drawArm();
+}
+
+/* 机械臂模式固件、锁住时才能动；松开时也能记点位、标零点。 */
+function updateArmButtons() {
+  const on = Boolean(app.port) && app.mode === 'ARM', st = armView.state;
+  const ready = on && st === 'READY', known = on && (st === 'READY' || st === 'FREE');
+  document.querySelectorAll('#wsArm .arm-move, #armColors button').forEach(b => { b.disabled = !ready; });
+  document.querySelectorAll('#wsArm .arm-over').forEach(b => { b.disabled = !known; });
+  $('armZeroBtn').disabled = !known || armView.moving;
+  $('armSaveBtn').disabled = $('armCamDir').disabled = !known;
+  $('armHold').disabled = $('armFree').disabled = !on || st === 'FAULT';
+  $('armFollowOff').disabled = $('armPointsRead').disabled = $('armPointsWrite').disabled = !on;
+  $('armFlip1').disabled = !on || !params.has('arm_flip1');
+  $('armFlip2').disabled = !on || !params.has('arm_flip2');
+  $('armModeFlip').disabled = !on || !params.has('arm_mode');
+  $('armCam').disabled = !on || !params.has('arm_cam');
+  const all = ARM_MACROS.every(([name]) => params.has(name)); // 导出要全部参数都读到
+  $('armExportH').disabled = !all;
+  $('armExportH').title = all ? '生成 firmware/User/Config/arm_calib.h：标定参数和点位，覆盖以后重新编译就是开机默认值，比赛时不接调试台也有' : '要先连上机械臂模式的固件读到参数';
+}
+
+/* 够得着的地方（逆解有在限位内的解）：几何不变就不重算，画在一张离屏画布上。 */
+function armShade(size, g, toBody) {
+  const key = JSON.stringify([size, g, css.accent]);
+  if (armView.shadeKey === key) return armView.shade;
+  const off = document.createElement('canvas');
+  off.width = off.height = size;
+  const o = off.getContext('2d');
+  o.fillStyle = css.accent;
+  const step = 4;
+  for (let py = 0; py < size; py += step)
+    for (let px = 0; px < size; px += step) {
+      const [x, y] = toBody(px + step / 2, py + step / 2);
+      if (armInverse(g, x, y, null)) o.fillRect(px, py, step, step);
+    }
+  armView.shade = off;
+  armView.shadeKey = key;
+  return off;
+}
+
+function drawArm() {
+  if (app.workspace !== 'arm') return;
+  const canvas = $('armCanvas'), wrap = $('armWrap');
+  const size = Math.floor(Math.min(wrap.clientWidth, wrap.clientHeight));
+  if (!size) return;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = canvas.style.height = size + 'px';
+  canvas.width = canvas.height = Math.round(size * dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const g = armGeometry();
+  const R = Math.max(...[0, 1].map(i => Math.hypot(...g.j[i]) + g.a[i] + g.b[i]), START_MM * 0.75) + 30;
+  const k = size / (2 * R), c = size / 2;
+  const S = (x, y) => [c - y * k, c - x * k]; // 车体系 → 画布：车头朝上、车左朝左
+  armView.toBody = (px, py) => [(c - py) / k, (c - px) / k];
+  ctx.fillStyle = css['panel-2'];
+  ctx.fillRect(0, 0, size, size);
+  ctx.strokeStyle = css.grid;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let v = -Math.floor(R / 50) * 50; v <= R; v += 50) {
+    const [sx] = S(0, v), [, sy] = S(v, 0);
+    ctx.moveTo(sx, 0); ctx.lineTo(sx, size);
+    ctx.moveTo(0, sy); ctx.lineTo(size, sy);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 0.18;
+  ctx.drawImage(armShade(size, g, armView.toBody), 0, 0, size, size);
+  ctx.globalAlpha = 1;
+  const square = (half, dash) => {
+    const [x0, y0] = S(half, half);
+    ctx.setLineDash(dash);
+    ctx.strokeRect(x0, y0, 2 * half * k, 2 * half * k);
+    ctx.setLineDash([]);
+  };
+  ctx.strokeStyle = css.axis;
+  ctx.lineWidth = 1.5;
+  square(ROBOT_MM / 2, []);
+  ctx.lineWidth = 1;
+  square(START_MM / 2, [4, 4]);
+  ctx.font = '11px system-ui, "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = css['text-3'];
+  const [fx, fy] = S(START_MM / 2, 0);
+  ctx.fillText('车头 ↑（虚线：出发前 300 mm 见方）', fx, fy - 3);
+  /* 点位 */
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  for (const [name, q] of Object.entries(armView.points)) {
+    const p = armForward(g, q);
+    if (!p) continue;
+    const [px, py] = S(...p), r = 5;
+    ctx.fillStyle = css.series[1];
+    ctx.beginPath();
+    ctx.moveTo(px, py - r); ctx.lineTo(px + r, py); ctx.lineTo(px, py + r); ctx.lineTo(px - r, py);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = css['text-2'];
+    ctx.fillText(name, px + r + 3, py);
+  }
+  /* 视觉看到的物料（底面 Ø50），正在跟的颜色加一圈 */
+  const following = armView.follow === 'off' ? -1 : ARM_COLOR_NAMES.indexOf(armView.follow.split(':')[0]);
+  for (const m of armView.materials) {
+    const [px, py] = S(m.x, m.y);
+    ctx.fillStyle = (MATERIALS[m.color] || ['', '#888'])[1];
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(px, py, Math.max(25 * k, 4), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (m.color === following) {
+      ctx.strokeStyle = css.accent;
+      ctx.beginPath();
+      ctx.arc(px, py, Math.max(25 * k, 4) + 4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+  /* 末端走过的轨迹 */
+  if (armView.trail.length > 1) {
+    ctx.strokeStyle = css.accent;
+    ctx.globalAlpha = 0.6;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    armView.trail.forEach(([x, y], i) => { const [px, py] = S(x, y); if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py); });
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  /* 两台电机（立柱）画成方块；两根大臂粗、两根小臂细，合不拢就只画大臂 */
+  const pose = (q, color, width, dash) => {
+    const elbows = armElbows(g, q), p = armForward(g, q), joints = [];
+    ctx.strokeStyle = color;
+    ctx.lineCap = 'round';
+    ctx.setLineDash(dash);
+    for (const i of [0, 1]) {
+      const [b0, b1] = S(...g.j[i]), [e0, e1] = S(...elbows[i]);
+      ctx.lineWidth = width;
+      ctx.beginPath(); ctx.moveTo(b0, b1); ctx.lineTo(e0, e1); ctx.stroke();
+      joints.push([e0, e1]);
+      if (!p) continue;
+      const [t0, t1] = S(...p);
+      ctx.lineWidth = width * 0.7;
+      ctx.beginPath(); ctx.moveTo(e0, e1); ctx.lineTo(t0, t1); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    if (p) joints.push(S(...p));
+    return joints;
+  };
+  if (armView.goal && armView.q && (armView.moving || Math.abs(armView.goal[0] - armView.q[0]) + Math.abs(armView.goal[1] - armView.q[1]) > 0.5))
+    pose(armView.goal, css['text-3'], 4, [6, 5]);
+  const q = armView.q || [90, 90]; // 设计图上的姿态
+  const ink = armView.q ? css.text : css['text-3'];
+  const joints = pose(q, ink, 7, []);
+  ctx.fillStyle = css['panel'];
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 2;
+  for (const [px, py] of joints) {
+    ctx.beginPath();
+    ctx.arc(px, py, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.fillStyle = ink;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const i of [0, 1]) {
+    const [bx, by] = S(...g.j[i]);
+    ctx.fillRect(bx - 7, by - 7, 14, 14);
+    ctx.fillStyle = css['panel'];
+    ctx.fillText(String(i + 1), bx, by + 1);
+    ctx.fillStyle = ink;
+  }
+  ctx.fillStyle = css['text-3'];
+  if (!armView.q) ctx.fillText('没有机械臂数据：画的是默认尺寸', c, size - 12);
+  else if (!armForward(g, q)) ctx.fillText('按现在的尺寸和装配方式合不拢：查尺寸、零点，或者换一种装配方式', c, size - 12);
+  if (armView.hover) {
+    const [hx, hy] = S(...armView.hover);
+    ctx.strokeStyle = css['text-2'];
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(hx - 8, hy); ctx.lineTo(hx + 8, hy);
+    ctx.moveTo(hx, hy - 8); ctx.lineTo(hx, hy + 8);
+    ctx.stroke();
+  }
+}
+
 const LOG_LIMIT = 1500;
 const logQueue = [];
 let logTimer = 0;
@@ -2646,7 +3432,85 @@ $('tuneChart').addEventListener('pointermove', e => {
 $('tuneChart').addEventListener('pointerleave', () => { tune.hover = null; drawTuneChart(); });
 new ResizeObserver(() => drawTuneChart()).observe($('tuneChartWrap'));
 
+for (let c = 1; c < ARM_COLOR_NAMES.length; ++c) {
+  const b = el('button');
+  b.dataset.color = ARM_COLOR_NAMES[c];
+  b.setAttribute('aria-pressed', 'false');
+  b.title = `末端跟着${MATERIALS[c][0]}色物料走`;
+  const dot = el('i');
+  dot.style.background = MATERIALS[c][1];
+  b.append(dot, document.createTextNode(MATERIALS[c][0]));
+  b.addEventListener('click', () => send(`/arm follow ${ARM_COLOR_NAMES[c]}`));
+  $('armColors').append(b);
+}
+$('armHold').addEventListener('click', () => send('/arm hold'));
+$('armFree').addEventListener('click', () => {
+  if (confirm('松开以后两个关节没有力，臂会顺着惯性滑。先用手扶好再确定？')) send('/arm free');
+});
+document.querySelectorAll('[data-jog]').forEach(b => b.addEventListener('click', () => {
+  const step = Number($(b.dataset.jog[0] === 'j' ? 'armStepQ' : 'armStepXY').value) * Number(b.dataset.sign);
+  send(`/arm jog ${b.dataset.jog} ${step}`);
+}));
+$('armJointForm').addEventListener('submit', e => {
+  e.preventDefault();
+  send(`/arm j ${Number($('armQ1').value)} ${Number($('armQ2').value)}`);
+});
+$('armXyForm').addEventListener('submit', e => {
+  e.preventDefault();
+  send(`/arm xy ${Number($('armX').value)} ${Number($('armY').value)}`);
+});
+$('armZeroForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const q1 = Number($('armZeroQ1').value), q2 = Number($('armZeroQ2').value);
+  if (confirm(`把臂现在的姿态定为 q1 = ${q1}°、q2 = ${q2}°？只改零点参数，臂不会动。`)) send(`/arm zero ${q1} ${q2}`);
+});
+for (const [id, name] of [['armFlip1', 'arm_flip1'], ['armFlip2', 'arm_flip2']])
+  $(id).addEventListener('change', () => { if (params.has(name)) commitParam(params.get(name), $(id).checked ? '1' : '0'); });
+$('armCam').addEventListener('change', () => { if (params.has('arm_cam')) commitParam(params.get('arm_cam'), $('armCam').value); });
+$('armModeFlip').addEventListener('click', () => {
+  const p = params.get('arm_mode');
+  if (p) commitParam(p, p.value >= 0.5 ? '0' : '1');
+});
+$('armCamDir').addEventListener('click', () => {
+  if (confirm('相机画面的上方现在正好朝车头？以后就按现在的小臂方向换算相机看到的位置。')) send('/arm camdir');
+});
+$('armFollowOff').addEventListener('click', () => send('/arm follow off'));
+$('armPointsRead').addEventListener('click', readArmPoints);
+$('armPointsWrite').addEventListener('click', writeArmPoints);
+$('armSaveForm').addEventListener('submit', e => { e.preventDefault(); saveArmPoint(); });
+$('armExportH').addEventListener('click', exportArmCalib);
+$('armExportJson').addEventListener('click', exportArmPoints);
+$('armImportJson').addEventListener('click', () => $('armImportFile').click());
+$('armImportFile').addEventListener('change', e => {
+  if (e.target.files[0]) importArmPoints(e.target.files[0]);
+  e.target.value = '';
+});
+$('armTrailClear').addEventListener('click', () => { armView.trail = []; drawArm(); });
+function armCanvasPoint(e) {
+  const r = $('armCanvas').getBoundingClientRect();
+  return armView.toBody ? armView.toBody(e.clientX - r.left, e.clientY - r.top) : null;
+}
+$('armCanvas').addEventListener('pointermove', e => {
+  const p = armCanvasPoint(e);
+  if (!p) return;
+  armView.hover = p;
+  const reach = armInverse(armGeometry(), p[0], p[1], null);
+  setText('armHover', `X ${p[0].toFixed(0)}  Y ${p[1].toFixed(0)}${reach ? '' : '  够不着'}`);
+  drawArm();
+});
+$('armCanvas').addEventListener('pointerleave', () => { armView.hover = null; setText('armHover', ''); drawArm(); });
+$('armCanvas').addEventListener('click', e => {
+  const p = armCanvasPoint(e);
+  if (!p) return;
+  if (!armInverse(armGeometry(), p[0], p[1], null)) { setText('armHover', '够不着：超出臂展或关节限位'); return; }
+  $('armX').value = p[0].toFixed(1);
+  $('armY').value = p[1].toFixed(1);
+  if ($('armClickMove').checked) send(`/arm xy ${p[0].toFixed(1)} ${p[1].toFixed(1)}`);
+});
+new ResizeObserver(() => drawArm()).observe($('armWrap'));
+
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { readColors(); tune.chart = null; drawTuneChart(); });
+renderArmPoints();
 if ('serial' in navigator) {
   navigator.serial.addEventListener?.('disconnect', e => { if (e.target === app.port) disconnect('串口被拔掉了'); });
 } else {

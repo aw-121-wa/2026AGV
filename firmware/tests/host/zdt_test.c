@@ -247,6 +247,28 @@ int main(void)
     assert(ZDT_ClearProtection(m) == HAL_OK);
     ZDT_Flush();
     expect(0, 0x0100, (const uint8_t[]){0x0E, 0x52, 0x6B}, 3);
+    /* 使能命令的应答按命令要的写：松开（机械臂示教）的应答不能算成使能了。 */
+    tx_count = 0;
+    tx_free = 16;
+    assert(ZDT_EnableMotor(m, 0U) == HAL_OK);
+    ZDT_Flush();
+    expect(0, 0x0100, (const uint8_t[]){0xF3, 0xAB, 0, 0, 0x6B}, 5);
+    receive(0x0100, (const uint8_t[]){0xF3, 0x02, 0x6B}, 3);
+    assert(!m->enabled);
+    assert(ZDT_EnableMotor(m, 1U) == HAL_OK);
+    ZDT_Flush();
+    receive(0x0100, (const uint8_t[]){0xF3, 0x02, 0x6B}, 3);
+    assert(m->enabled);
+    /* 紧急停机（栈溢出钩子）：这一拍攒的帧丢掉，每台注册过的电机一条立即停止，马上交给硬件。 */
+    tx_count = 0;
+    tx_free = 16;
+    assert(ZDT_SetSpeed(m, 100, 0, ZDT_SYNC_NOW) == HAL_OK && ZDT_RequestPosition(m2) == HAL_OK);
+    ZDT_EmergencyStop();
+    assert(tx_count == 3 && ZDT_Staged(m) == 0U && ZDT_Staged(m2) == 0U);
+    static const uint32_t stop_id[3] = {0x0400, 0x0200, 0x0100};
+    for (unsigned i = 0; i < 3; ++i)
+        expect(i, stop_id[i], (const uint8_t[]){0xFE, 0x98, 0, 0x6B}, 4);
+    tx_free = 16;
     /* Bus-Off: Stop + Start clears INIT, counted, throttled to one try per 100 ms. */
     unsigned s0 = starts;
     ZDT_Service();
@@ -259,6 +281,6 @@ int main(void)
     assert(starts == s0 + 1);
     puts("PASS: X speed/position/stop/sync packing, multi-packet split, FIFO guard, per-motor TX "
          "grouping, 0.1 RPM/0.1 deg parsing, status bits, reply counts, RX drop/lost count, bus "
-         "errors, clear-protection, bus-off recovery");
+         "errors, clear-protection, enable/disable acks, emergency stop, bus-off recovery");
     return 0;
 }

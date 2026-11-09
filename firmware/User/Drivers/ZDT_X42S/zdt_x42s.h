@@ -6,7 +6,7 @@
 /* ZDT_X42S 第二代闭环步进，仅支持 X 固件协议（手册 V1.0.3 第 4.2/5 章）。
    X 固件速度单位 0.1 RPM，位置单位 0.1°。 */
 
-#define ZDT_MAX_MOTORS     4U
+#define ZDT_MAX_MOTORS     6U     // 底盘四个轮子 + 机械臂两个关节
 #define ZDT_MAX_RPM_X10    30000U // 3000.0 RPM
 #define ZDT_BROADCAST_ADDR 0U
 
@@ -43,6 +43,7 @@ typedef struct
     uint8_t protected_flag; // Cgp_TF：堵转保护已触发
     uint8_t ack_code; // 最近一次命令应答码：0x02 正确、0xE2 参数/条件错、0xEE 格式错
     uint8_t ack_pending; // 1 表示命令已入队、尚未收到应答
+    uint8_t enable_cmd;  // 最近一条使能命令要的是使能（1）还是松开（0），应答正确后写进 enabled
     uint8_t speed_valid;
     uint8_t status_valid;
     float position_deg; // 实时位置，度
@@ -77,6 +78,8 @@ HAL_StatusTypeDef ZDT_Stop(zdt_motor *motor, zdt_sync sync);
 HAL_StatusTypeDef ZDT_ClearProtection(zdt_motor *motor);
 // 5.3.14 广播触发所有已缓存命令同时执行。
 HAL_StatusTypeDef ZDT_SyncTrigger(void);
+// 紧急停机（栈溢出钩子、关中断以后也能用）：丢掉这一拍攒的帧，给每台注册过的电机发立即停止并马上交给硬件。
+void ZDT_EmergencyStop(void);
 
 // 读取命令，结果在 ZDT_ProcessData 中刷新。
 HAL_StatusTypeDef ZDT_RequestPosition(zdt_motor *motor);

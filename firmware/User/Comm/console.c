@@ -11,9 +11,12 @@
 #include "competition.h"
 #elif AGV_MODE == AGV_MODE_SURVEY
 #include "agv_run.h"
+#elif AGV_MODE == AGV_MODE_ARM
+#include "arm.h"
+#include "arm_app.h"
 #endif
 
-#define CONSOLE_ARGS 4U // 最长的命令 /pose x y heading
+#define CONSOLE_ARGS 5U // 最长的命令 /arm point <名字> <q1> <q2>
 #define STOPPED_ONLY 1U // 运动中一改速度或路径就会跳，只能停车改
 
 typedef struct
@@ -31,6 +34,8 @@ typedef struct
     {#field, &chassis_tune.field, &chassis_tune_default.field, lo, hi, dec, flags}
 #define LIDAR_PARAM(field, lo, hi, dec)                                                            \
     {#field, &lidar_tune.field, &lidar_tune_default.field, lo, hi, dec, 0U}
+#define ARM_PARAM(field, lo, hi, dec)                                                              \
+    {"arm_" #field, &arm_tune.field, &arm_tune_default.field, lo, hi, dec, 0U}
 
 static const Param params[] = {
     CHASSIS_PARAM(heading_kp, 0.0f, 20.0f, 3U, 0U),
@@ -60,6 +65,33 @@ static const Param params[] = {
     LIDAR_PARAM(obs_confirm, 1.0f, 50.0f, 0U),
     LIDAR_PARAM(servo_scan, 0.0f, COMP_SERVO_RANGE_DEG, 1U),
     LIDAR_PARAM(servo_stow, 0.0f, COMP_SERVO_RANGE_DEG, 1U),
+#elif AGV_MODE == AGV_MODE_ARM
+    /* 机械臂自己处理参数变化（零点、方向改了从当前位置重新规划），不用停车才能改。 */
+    ARM_PARAM(j1_x, -300.0f, 300.0f, 1U),
+    ARM_PARAM(j1_y, -300.0f, 300.0f, 1U),
+    ARM_PARAM(j2_x, -300.0f, 300.0f, 1U),
+    ARM_PARAM(j2_y, -300.0f, 300.0f, 1U),
+    ARM_PARAM(a1, 20.0f, 500.0f, 1U),
+    ARM_PARAM(b1, 20.0f, 500.0f, 1U),
+    ARM_PARAM(a2, 20.0f, 500.0f, 1U),
+    ARM_PARAM(b2, 20.0f, 500.0f, 1U),
+    ARM_PARAM(mode, 0.0f, 1.0f, 0U),
+    ARM_PARAM(margin, 0.0f, 45.0f, 1U),
+    ARM_PARAM(zero1, -180.0f, 180.0f, 2U),
+    ARM_PARAM(zero2, -180.0f, 180.0f, 2U),
+    ARM_PARAM(flip1, 0.0f, 1.0f, 0U),
+    ARM_PARAM(flip2, 0.0f, 1.0f, 0U),
+    ARM_PARAM(q1_min, -180.0f, 180.0f, 1U),
+    ARM_PARAM(q1_max, -180.0f, 180.0f, 1U),
+    ARM_PARAM(q2_min, -180.0f, 180.0f, 1U),
+    ARM_PARAM(q2_max, -180.0f, 180.0f, 1U),
+    ARM_PARAM(speed, 5.0f, 720.0f, 0U),
+    ARM_PARAM(acc, 10.0f, 5000.0f, 0U),
+    ARM_PARAM(cam, 0.0f, 2.0f, 0U),
+    ARM_PARAM(cam_rot, -180.0f, 180.0f, 1U),
+    ARM_PARAM(cam_x, -500.0f, 500.0f, 1U),
+    ARM_PARAM(cam_y, -500.0f, 500.0f, 1U),
+    ARM_PARAM(cam_lag, 0.0f, 300.0f, 0U),
 #endif
 };
 #define PARAM_COUNT (sizeof(params) / sizeof(params[0]))
@@ -114,6 +146,11 @@ static void CmdHelp(void)
                           "  /obs  /scan  /pose <x> <y> <heading>  /route [<x> <y>|go]\r\n"
 #elif AGV_MODE == AGV_MODE_SURVEY
                           "  /route\r\n"
+#elif AGV_MODE == AGV_MODE_ARM
+                          "  /arm  /arm hold|free  /arm j <q1> <q2>  /arm xy <x> <y>\r\n"
+                          "  /arm jog <j1|j2|x|y> <step>  /arm zero [<q1> <q2>]  /arm camdir\r\n"
+                          "  /arm save|go|del <name>  /arm point <name> <q1> <q2>  /arm points\r\n"
+                          "  /arm follow <red|yellow|blue|green|black|lightblue|off>\r\n"
 #endif
     );
 }
@@ -226,6 +263,169 @@ static void CmdLog(const char *arg)
     else
         ChassisTelemetry_Printf("ERR  usage: /log [on|off]\r\n");
 }
+
+#if AGV_MODE == AGV_MODE_ARM
+static void ArmBusy(void)
+{
+    static const char *const why[] = {"waiting for the motors", "settling, try again",
+                                      "free, /arm hold first", "in fault, send S"};
+    ChassisTelemetry_Printf("BUSY arm %s\r\n", arm.state == ARM_READY && arm.moving
+                                                   ? "moving, wait for ARM done"
+                                                   : why[arm.state]);
+}
+
+static void ArmLimits(void)
+{
+    ChassisTelemetry_Printf(
+        "ERR  arm: q1 must be %s..%s, q2 %s..%s\r\n", ChassisTelemetry_Num(arm_tune.q1_min, 1),
+        ChassisTelemetry_Num(arm_tune.q1_max, 1), ChassisTelemetry_Num(arm_tune.q2_min, 1),
+        ChassisTelemetry_Num(arm_tune.q2_max, 1));
+}
+
+static void ArmMoved(arm_result result)
+{
+    if (result == ARM_BUSY)
+        ArmBusy();
+    else if (result == ARM_LIMIT)
+        ArmLimits();
+    else if (result == ARM_REACH)
+        ChassisTelemetry_Printf("ERR  arm: out of reach (no pose there clears the dead points by "
+                                "arm_margin)\r\n");
+    else if (result == ARM_PATH)
+        ChassisTelemetry_Printf("ERR  arm: the way there passes a dead point, go through another "
+                                "point first\r\n");
+    else
+        ChassisTelemetry_Printf("OK   arm to q=%s,%s\r\n", ChassisTelemetry_Num(arm.goal[0], 2),
+                                ChassisTelemetry_Num(arm.goal[1], 2));
+}
+
+static void ArmPoint(const arm_point *p)
+{
+    ChassisTelemetry_Printf("ARM point %s %s %s\r\n", p->name, ChassisTelemetry_Num(p->q[0], 2),
+                            ChassisTelemetry_Num(p->q[1], 2));
+}
+
+/* 存点位：名字不对和超限位都是 ERROR，分开说。 */
+static void ArmSavePoint(const char *name, float q1, float q2)
+{
+    HAL_StatusTypeDef result = Arm_SetPoint(name, q1, q2);
+    if (result == HAL_OK)
+        ArmPoint(Arm_FindPoint(name));
+    else if (result == HAL_BUSY)
+        ChassisTelemetry_Printf("BUSY arm: point table full (%u)\r\n", ARM_POINTS);
+    else if (!Arm_ValidName(name))
+        ChassisTelemetry_Printf(
+            "ERR  arm: point name is 1..%u of a-z 0-9 _, starting with a letter\r\n", ARM_NAME_MAX);
+    else
+        ArmLimits();
+}
+
+/* 机械臂：标定、点动、点位、跟随（格式见 arm_app.h）。零点和相机方向通过 CmdSet 改参数，回复和
+   /set 一样，调试台照常记下来。 */
+static void CmdArm(unsigned argc, char *argv[])
+{
+    const char *sub = argc >= 2U ? argv[1] : "";
+    float a = 0.0f, b = 0.0f;
+    uint8_t pair = argc == 4U && ParseNumber(argv[2], &a) && ParseNumber(argv[3], &b);
+    if (argc == 1U)
+        ArmApp_PrintStatus();
+    else if ((strcmp(sub, "hold") == 0 || strcmp(sub, "free") == 0) && argc == 2U)
+    {
+        if (Arm_SetFree(sub[0] == 'f') != HAL_OK)
+            ArmBusy();
+        else
+            ChassisTelemetry_Printf("OK   arm %s\r\n",
+                                    sub[0] == 'f' ? "free: move it by hand" : "hold");
+    }
+    else if (strcmp(sub, "j") == 0 && pair)
+        ArmMoved(Arm_MoveJoints(a, b));
+    else if (strcmp(sub, "xy") == 0 && pair)
+        ArmMoved(Arm_MoveTo(a, b));
+    else if (strcmp(sub, "jog") == 0 && argc == 4U && ParseNumber(argv[3], &b) &&
+             (strcmp(argv[2], "j1") == 0 || strcmp(argv[2], "j2") == 0 ||
+              strcmp(argv[2], "x") == 0 || strcmp(argv[2], "y") == 0))
+    {
+        /* 从目标算起：连着点几下会累加，不用等上一下走完。 */
+        float x, y;
+        if (argv[2][0] == 'j')
+            ArmMoved(Arm_MoveJoints(arm.goal[0] + (argv[2][1] == '1' ? b : 0.0f),
+                                    arm.goal[1] + (argv[2][1] == '2' ? b : 0.0f)));
+        else if (!Arm_Forward(arm.goal[0], arm.goal[1], &x, &y))
+            ArmMoved(ARM_REACH);
+        else
+            ArmMoved(
+                Arm_MoveTo(x + (argv[2][0] == 'x' ? b : 0.0f), y + (argv[2][0] == 'y' ? b : 0.0f)));
+    }
+    else if (strcmp(sub, "zero") == 0 && (argc == 2U || pair))
+    {
+        float zero[2];
+        HAL_StatusTypeDef result = Arm_ZeroFor(a, b, zero);
+        if (result == HAL_BUSY)
+            ArmBusy();
+        else if (result != HAL_OK)
+            ChassisTelemetry_Printf("ERR  arm: zero angles must be -180..180\r\n");
+        else
+        {
+            CmdSet("arm_zero1", ChassisTelemetry_Num(zero[0], 2));
+            CmdSet("arm_zero2", ChassisTelemetry_Num(zero[1], 2));
+        }
+    }
+    else if (strcmp(sub, "camdir") == 0 && argc == 2U)
+    {
+        float deg;
+        if (arm.state != ARM_READY && arm.state != ARM_FREE)
+            ArmBusy();
+        else if (!Arm_CameraDirection(&deg))
+            ChassisTelemetry_Printf("ERR  arm: camera is not on a forearm (arm_cam 1 or 2)\r\n");
+        else
+            CmdSet("arm_cam_rot", ChassisTelemetry_Num(deg, 1));
+    }
+    else if (strcmp(sub, "follow") == 0 && argc == 3U &&
+             (strcmp(argv[2], "off") == 0 || ArmApp_ParseColor(argv[2])))
+    {
+        uint8_t color = ArmApp_ParseColor(argv[2]);
+        if (Arm_Follow(color) != HAL_OK)
+            ArmBusy();
+        else
+            ChassisTelemetry_Printf("OK   arm follow %s\r\n",
+                                    color ? ArmApp_ColorName(color) : "off");
+    }
+    else if (strcmp(sub, "points") == 0 && argc == 2U)
+    {
+        for (unsigned i = 0; i < Arm_PointCount(); ++i)
+            ArmPoint(Arm_PointAt(i));
+        ChassisTelemetry_Printf("ARM points %u\r\n", Arm_PointCount());
+    }
+    else if (strcmp(sub, "point") == 0 && argc == 5U && ParseNumber(argv[3], &a) &&
+             ParseNumber(argv[4], &b))
+        ArmSavePoint(argv[2], a, b);
+    else if (strcmp(sub, "save") == 0 && argc == 3U)
+    {
+        if ((arm.state != ARM_READY && arm.state != ARM_FREE) || arm.moving)
+            ArmBusy();
+        else
+            ArmSavePoint(argv[2], arm.q[0], arm.q[1]);
+    }
+    else if ((strcmp(sub, "go") == 0 || strcmp(sub, "del") == 0) && argc == 3U)
+    {
+        const arm_point *p = Arm_FindPoint(argv[2]);
+        if (p == NULL)
+            ChassisTelemetry_Printf("ERR  arm: no point '%s' (/arm points)\r\n", argv[2]);
+        else if (sub[0] == 'g')
+            ArmMoved(Arm_MoveJoints(p->q[0], p->q[1]));
+        else
+        {
+            (void)Arm_DeletePoint(argv[2]);
+            ChassisTelemetry_Printf("OK   arm point %s deleted\r\n", argv[2]);
+        }
+    }
+    else
+        ChassisTelemetry_Printf("ERR  usage: /arm [hold|free|points|camdir], /arm j|xy <a> <b>, "
+                                "/arm jog j1|j2|x|y <step>, /arm zero [<q1> <q2>], "
+                                "/arm save|go|del <name>, /arm point <name> <q1> <q2>, "
+                                "/arm follow <color|off>\r\n");
+}
+#endif
 
 #if AGV_MODE == AGV_MODE_COMPETITION
 static void CmdVision(const char *mode_text, const char *color_text)
@@ -403,6 +603,9 @@ void Console_Line(char *line)
 #elif AGV_MODE == AGV_MODE_SURVEY
     else if (strcmp(cmd, "route") == 0 && argc == 1U)
         Agv_RouteReport();
+#elif AGV_MODE == AGV_MODE_ARM
+    else if (strcmp(cmd, "arm") == 0)
+        CmdArm(argc, argv);
 #endif
     else
         ChassisTelemetry_Printf("ERR  bad console command, /help lists them\r\n");

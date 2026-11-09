@@ -265,7 +265,10 @@ static HAL_StatusTypeDef ZDT_SendMotorCommand(zdt_motor *motor, uint8_t code, co
 HAL_StatusTypeDef ZDT_EnableMotor(zdt_motor *motor, uint8_t enable)
 {
     const uint8_t args[3] = {ZDT_PROTO_ENABLE, enable ? 1U : 0U, ZDT_SYNC_NOW};
-    return ZDT_SendMotorCommand(motor, ZDT_CODE_ENABLE, args, sizeof(args));
+    HAL_StatusTypeDef status = ZDT_SendMotorCommand(motor, ZDT_CODE_ENABLE, args, sizeof(args));
+    if (status == HAL_OK)
+        motor->enable_cmd = enable ? 1U : 0U;
+    return status;
 }
 
 /* F6 <方向> <加速度 RPM/s, BE16> <速度 0.1RPM, BE16> <同步> 6B */
@@ -312,6 +315,16 @@ HAL_StatusTypeDef ZDT_ClearProtection(zdt_motor *motor)
 {
     const uint8_t args[1] = {ZDT_PROTO_CLEAR};
     return ZDT_SendMotorCommand(motor, ZDT_CODE_CLEAR, args, sizeof(args));
+}
+
+void ZDT_EmergencyStop(void)
+{
+    if (zdt_can == NULL)
+        return;
+    tx_staged = 0U;
+    for (uint8_t i = 0; i < motor_count; ++i)
+        (void)ZDT_Stop(&motors[i], ZDT_SYNC_NOW);
+    ZDT_Flush();
 }
 
 /* 00 FF 66 6B：广播命令只有地址 1 应答。 */
@@ -457,7 +470,7 @@ static void ZDT_HandleFrame(const zdt_frame *frame)
         if (code != ZDT_CODE_SYNC) // 广播同步由地址 1 应答，不是发给它的命令
             ++motor->acks;
         if (code == ZDT_CODE_ENABLE)
-            motor->enabled = data[1] == ZDT_ACK_OK;
+            motor->enabled = data[1] == ZDT_ACK_OK && motor->enable_cmd;
         return;
     }
     ++motor->rx_errors;

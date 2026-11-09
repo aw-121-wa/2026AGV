@@ -1,5 +1,5 @@
 #include "agv_config.h"
-#if AGV_MODE == AGV_MODE_COMPETITION
+#if AGV_MODE == AGV_MODE_COMPETITION || AGV_MODE == AGV_MODE_ARM
 #include "ser_port.h"
 #include <string.h>
 

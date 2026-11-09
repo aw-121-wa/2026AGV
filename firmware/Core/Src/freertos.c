@@ -32,6 +32,7 @@
 #include "chassis_cmd.h"
 #include "agv_run.h"
 #include "competition.h"
+#include "arm_app.h"
 #include "tune_log.h"
 /* USER CODE END Includes */
 
@@ -87,14 +88,13 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName);
 
 /* USER CODE BEGIN 4 */
-/* 栈溢出：尽力让四个电机立即停止（FDCAN 由硬件发送，不依赖 RTOS），然后停机等调试。 */
+/* 栈溢出：尽力让所有电机（四个轮子、机械臂）立即停止（FDCAN 由硬件发送，不依赖 RTOS），然后停机等调试。 */
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
   (void)xTask;
   taskDISABLE_INTERRUPTS();
   stack_overflow_task = pcTaskName;
-  for (uint8_t address = ZDT_ADDR_LF; address <= ZDT_ADDR_RR; ++address)
-    (void)ZDT_Stop(ZDT_FindMotor(address), ZDT_SYNC_NOW);
+  ZDT_EmergencyStop();
   for (;;)
   {
   }
@@ -193,6 +193,8 @@ void StartChassisTask(void *argument)
 
 #if AGV_MODE == AGV_MODE_COMPETITION
     Comp_Tick();
+#elif AGV_MODE == AGV_MODE_ARM
+    ArmApp_Tick();
 #endif
 
     Chassis_CycleEnd();

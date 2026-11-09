@@ -12,7 +12,7 @@ ROOT =Path(__file__).resolve().parents[1]
 BUILD = Path(os.environ.get('AGV_HOST_BUILD') or ROOT / 'build' / 'host')
 INCLUDES = ['tests/host', 'User/Config', 'User/Common', 'User/Drivers/HWT101',
             'User/Drivers/ZDT_X42S', 'User/Drivers/RPLidar', 'User/Drivers/SerPort',
-            'User/Drivers/Servo', 'User/Chassis',
+            'User/Drivers/Servo', 'User/Chassis', 'User/Arm',
             'User/Comm', 'User/Navigation', 'User/App']
 CFLAGS = ['gcc', '-std=c11', '-Wall', '-Wextra', '-Werror'] + ['-I' + i for i in INCLUDES]
 NAV = ['User/Navigation/map.c', 'User/Navigation/astar.c', 'User/Navigation/survey.c']
@@ -62,7 +62,7 @@ def main():
     fixture = BUILD / 'tune_fixture.log'
     run('tune_log_test', [], args=[str(fixture)])
     node_tests(fixture)
-    for mode in range(3):
+    for mode in range(4):
         run('mode_test@' + str(mode), [], ['-DAGV_MODE=' + str(mode)])
     run('survey_loop_test', NAV + ['User/App/agv_run.c'], ['-DAGV_MODE=1'])
     run('comp_task_test', ['User/App/competition.c', 'User/App/task_code.c',
@@ -75,6 +75,8 @@ def main():
                                   'User/App/task_code.c', 'User/Navigation/lidar_obstacle.c',
                                   'User/Drivers/RPLidar/rplidar.c', 'User/Comm/vision_link.c'],
         ['-DAGV_MODE=2'])
+    run('arm_test', ['User/Comm/console.c', 'User/App/arm_app.c', 'User/Comm/vision_link.c'],
+        ['-DAGV_MODE=3'])
     subprocess.run([sys.executable, 'tests/vision_protocol_test.py'], cwd=ROOT, check=True,
                    timeout=60)
     print('ALL HOST TESTS PASSED')

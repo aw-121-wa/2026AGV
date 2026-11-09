@@ -65,6 +65,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User/Comm/vision_link.c
     User/App/competition.c
     User/App/task_code.c
+    # 机械臂（AGV_MODE=3 才用，别的模式链接时去掉）
+    User/Arm/arm.c
+    User/App/arm_app.c
 )
 
 # Add include paths
@@ -78,6 +81,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     User/Drivers/RPLidar
     User/Drivers/Servo
     User/Chassis
+    User/Arm
     User/Comm
     User/Navigation
     User/App

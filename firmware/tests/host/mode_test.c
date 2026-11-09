@@ -3,6 +3,8 @@
 #include <string.h>
 #include "chassis.h"
 #include "agv_config.h"
+/* 巡检和机械臂模式不接受手动运动。 */
+#define LOCKED (AGV_MODE == AGV_MODE_SURVEY || AGV_MODE == AGV_MODE_ARM)
 static unsigned move_calls, stop_calls, latches;
 chassis_t chassis;
 void ChassisTelemetry_Init(UART_HandleTypeDef *u)
@@ -79,6 +81,13 @@ void Agv_Stop(void)
     ++latches;
     Chassis_Stop();
 }
+#if AGV_MODE == AGV_MODE_ARM
+static unsigned arm_stops;
+void Arm_Stop(void)
+{
+    ++arm_stops;
+}
+#endif
 HAL_StatusTypeDef HAL_UARTEx_ReceiveToIdle_IT(UART_HandleTypeDef *u, uint8_t *b, uint16_t n)
 {
     (void)u;
@@ -112,11 +121,12 @@ int main(void)
     ChassisCmd_Poll();
     assert(console_calls == 1U && strcmp(console_seen, "set heading_tol 2") == 0);
     assert(stop_calls == 0U && latches == 0U);
-    /* 巡检模式路线固定，不接受手动运动；比赛模式流程没跑时可以手动开车调试。 */
+    /* 巡检模式路线固定、机械臂模式底盘一直停着，不接受手动运动；比赛模式流程没跑时可以手动开车调试。
+     */
     memcpy(rx_buf, "F100", 4);
     ChassisCmd_RxEvent(&u, 4);
     ChassisCmd_Poll();
-    assert(move_calls == (AGV_MODE == AGV_MODE_SURVEY ? 0U : 1U));
+    assert(move_calls == (LOCKED ? 0U : 1U));
     memcpy(rx_buf, "S", 1);
     ChassisCmd_RxEvent(&u, 1);
     ChassisCmd_Poll();
@@ -128,7 +138,10 @@ int main(void)
     memcpy(rx_buf, "\nW\n", 3); /* first \n ends the line discarded after the overflow */
     ChassisCmd_RxEvent(&u, 3);
     ChassisCmd_Poll();
-    assert(wheel_calls == (AGV_MODE == AGV_MODE_SURVEY ? 0U : 1U));
+    assert(wheel_calls == (LOCKED ? 0U : 1U));
+#if AGV_MODE == AGV_MODE_ARM
+    assert(arm_stops == 2U); /* S 和接收溢出都停机械臂 */
+#endif
 #if AGV_MODE == AGV_MODE_COMPETITION
     /* 比赛流程运行中不接受手动运动和单轮测试，S 能停流程。 */
     unsigned moves = move_calls, wheels = wheel_calls, stops = run_stops;

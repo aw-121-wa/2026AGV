@@ -11,6 +11,8 @@
 #endif
 #if AGV_MODE == AGV_MODE_COMPETITION
 #include "competition.h"
+#elif AGV_MODE == AGV_MODE_ARM
+#include "arm.h"
 #endif
 
 #define CMD_BUF_SIZE  32U
@@ -62,6 +64,8 @@ static void StopRobot(void)
 {
 #if AGV_MODE == AGV_MODE_COMPETITION
     Comp_Stop();
+#elif AGV_MODE == AGV_MODE_ARM
+    Arm_Stop();
 #endif
 #if AGV_MODE != AGV_MODE_COMMAND
     Agv_Stop();
@@ -70,10 +74,10 @@ static void StopRobot(void)
 #endif
 }
 
-/* 巡检路线是固定的，比赛流程运行中规则禁止遥控：这些时候不接受手动运动。 */
+/* 巡检路线是固定的，比赛流程运行中规则禁止遥控，机械臂模式底盘一直停着：这些时候不接受手动运动。 */
 static uint8_t ManualLocked(void)
 {
-#if AGV_MODE == AGV_MODE_SURVEY
+#if AGV_MODE == AGV_MODE_SURVEY || AGV_MODE == AGV_MODE_ARM
     return 1U;
 #elif AGV_MODE == AGV_MODE_COMPETITION
     return Comp_Running();
