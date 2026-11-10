@@ -117,14 +117,15 @@ foreach(key CHASSIS_USE_IMU CHASSIS_WHEEL_DIR_LF CHASSIS_WHEEL_DIR_RF CHASSIS_WH
         target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ${key}=${${key}})
     endif()
 endforeach()
-# 巡检速度允许小数，例如 -DAGV_SURVEY_SPEED_MM_S=200 或 =187.5。
-if(DEFINED AGV_SURVEY_SPEED_MM_S)
-    if(NOT "${AGV_SURVEY_SPEED_MM_S}" MATCHES "^[0-9]+([.][0-9]+)?$")
-        message(FATAL_ERROR "AGV_SURVEY_SPEED_MM_S must be a positive number")
+# 允许小数的数值参数，例如 -DAGV_SURVEY_SPEED_MM_S=200 或 -DCHASSIS_PATH_CORNER_FACTOR=2。
+foreach(key AGV_SURVEY_SPEED_MM_S CHASSIS_PATH_CORNER_FACTOR AGV_CROSS_TRACK_MM)
+    if(DEFINED ${key})
+        if(NOT "${${key}}" MATCHES "^[0-9]+([.][0-9]+)?$")
+            message(FATAL_ERROR "${key} must be a positive number")
+        endif()
+        target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ${key}=${${key}})
     endif()
-    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-        AGV_SURVEY_SPEED_MM_S=${AGV_SURVEY_SPEED_MM_S})
-endif()
+endforeach()
 
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)

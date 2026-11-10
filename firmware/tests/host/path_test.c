@@ -3,7 +3,8 @@
 #undef main
 
 /* 拐角限速只管拐角本身：1000 mm 直线接 90° 弯，限速 300 mm/s 时直线中段要跑满，入弯前刹到
-   拐角速度（默认约 50 mm/s），弯内不超速，轨迹仍在容差内。理想用时约 6 s。 */
+   拐角速度（上限由 CHASSIS_PATH_CORNER_FACTOR 决定，见 chassis.h），弯内明显低于直线速度，
+   轨迹仍在容差内。理想用时约 6 s。 */
 static void TestStraightBeforeCornerRunsAtLimit(void)
 {
     Chassis_SetMoveSpeedLimit(300);
@@ -28,7 +29,7 @@ static void TestStraightBeforeCornerRunsAtLimit(void)
            corner_speed, max_error, (unsigned)(ms - start));
     assert(chassis_path_result.completed);
     assert(mid_speed > 295);
-    assert(corner_speed < 60);
+    assert(corner_speed < mid_speed * 0.5f);
     assert(max_error <= CHASSIS_PATH_DEVIATION_MM);
     assert(ms - start < 8000);
 }

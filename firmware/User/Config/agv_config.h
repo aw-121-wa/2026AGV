@@ -39,7 +39,13 @@
 
 /* 回库定位目标值：残差只作为统计量（$A 帧）上报，不单独判故障。 */
 #define AGV_POSITION_TOL_MM 5.0f
-#define AGV_CROSS_TRACK_MM  8.0f
+/* 路径偏线故障阈值。原来是 8 mm，按 400 mm/s + 圆弧过弯整定的：跑图提速到 1200 mm/s、
+   拐角改成“停稳再走”以后，实车刹车有个几十毫米的过冲，8 mm 会一路误报 AGV_ERR_POSE（上位机
+   显示“偏线过大或位置越界”）。通道宽 850 mm、车宽 270 mm，横向余量约 ±290 mm，40 mm 仍然安全；
+   真正的越界防护是 Map_CanPoseHeading 那条。 */
+#ifndef AGV_CROSS_TRACK_MM
+#define AGV_CROSS_TRACK_MM 40.0f
+#endif
 /* 航向安全限：持续超过 AGV_HEADING_FAULT_MS 才判故障，避免起步瞬态误停车。
    0.2° 精度指标由底盘 heading_peak_dynamic / heading_over_limit 统计，不再用来停车。 */
 #define AGV_HEADING_FAULT_DEG 3.0f
@@ -49,14 +55,19 @@
 #ifndef AGV_SURVEY_LAPS
 #define AGV_SURVEY_LAPS 1U // 完整覆盖圈数，仅最后一圈入库
 #endif
+/* 跑图拐角：1 = 每个航点停稳再走（默认），0 = 连续过弯（拐角插贝塞尔圆弧，对照用）。
+   90° 拐角上 LF/RR 两个轮子要从 +v 走到 -v，连续过弯时它们是在车还动着的时候穿过 0 RPM，
+   带负载时驱动器会判堵转（Cgp_TF）直接断输出；停稳再换向时，过零点对应的是“命令 0 速”，
+   不会触发保护。实测仿真圈速 23.6 s（连续过弯 20.9 s），只慢 2.7 s。 */
 #ifndef AGV_STOP_EACH_SEGMENT
-#define AGV_STOP_EACH_SEGMENT 0U // 1 用于逐段停车对照
+#define AGV_STOP_EACH_SEGMENT 1U
 #endif
 #if AGV_SURVEY_LAPS < 1 || AGV_SURVEY_LAPS > 8 || AGV_STOP_EACH_SEGMENT > 1
 #error Invalid survey configuration
 #endif
+/* 巡检速度 mm/s：400 的三倍。运行时钳位到 10~CHASSIS_MOVE_MAX_SPEED（2000）。 */
 #ifndef AGV_SURVEY_SPEED_MM_S
-#define AGV_SURVEY_SPEED_MM_S 400.0f // 巡检速度 mm/s；运行时钳位到 10~CHASSIS_MOVE_MAX_SPEED
+#define AGV_SURVEY_SPEED_MM_S 1200.0f
 #endif
 
 /* 串口指令模式（F/B/L/R/T/A）的移动速度 mm/s。 */

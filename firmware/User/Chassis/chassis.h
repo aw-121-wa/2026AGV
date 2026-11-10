@@ -6,7 +6,10 @@
 #include "zdt_x42s.h"
 
 /* 机械参数 */
-#define CHASSIS_WHEEL_DIA_MM 77.0f  // 麦轮外径（含辊子包络），卡尺量
+/* 卡尺量的是 77.0（含辊子包络），但按 77.0 跑 F2400 实走 2436 mm（+1.5%）：固件的里程计和下发的
+   转速都用这个值换算，实测偏小会让车一直多走。按 2400/2436 标定成 78.16，里程和速度一起修正。
+   现场还可以停机用 /set wheel_dia 微调。 */
+#define CHASSIS_WHEEL_DIA_MM 78.16f
 #define CHASSIS_LX_MM        210.0f // 轴距：前后轮中心距
 #define CHASSIS_LY_MM        230.4f // 轮距：左右轮中心距
 #define CHASSIS_GEAR_RATIO   1.0f   // 电机转数/轮转数，直驱填 1.0
@@ -35,14 +38,22 @@
 #define CHASSIS_FEEDBACK_TIMEOUT_MS 500U
 #define CHASSIS_MOVE_MAX_SPEED      2000.0f // mm/s
 #define CHASSIS_DISTANCE_KP         1.5f   // 1/s
-#define CHASSIS_DISTANCE_TOL_MM     3.0f
-#define CHASSIS_HEADING_KP          5.6f  // (deg/s)/deg
+#define CHASSIS_DISTANCE_TOL_MM     1.0f   // 定距到位容差；3 mm 时 F2400 会正好停在容差边上
+#define CHASSIS_HEADING_KP          9.34f // (deg/s)/deg
 #define CHASSIS_TURN_MAX_SPEED      180.0f // deg/s
 #define CHASSIS_HEADING_TOL_DEG     0.1f  // 静态验收误差上限（仍需外部基准实测）
 #define CHASSIS_DYNAMIC_TOL_DEG     0.2f  // 平移期间航向误差验收上限
-#define CHASSIS_HEADING_KI          2.14f  // 初始积分增益，实车低速标定
+#define CHASSIS_HEADING_KI          0.19f  // 初始积分增益，实车低速标定
 #define CHASSIS_HEADING_I_MAX       7.0f  // 积分输出上限，deg/s
 #define CHASSIS_HEADING_I_ZONE      8.0f  // 小误差积分，避免大角度转向积累
+/* 下面三个由自动调参量出来（调试台“自动调参”，README 11.5），0 = 不用，和原来一样。
+   刹车曲线：离目标 e 度时比例项最多转 sqrt(2·a·e)，就是按减速度 a 正好停在目标上的转速。没有它，
+   大角度转到快到位时比例项降得比角加速度斜坡快，车跟不上就冲过头，kp 只能往小里调。
+   平移前馈：平移时车身会跟着转（轮径、辊子打滑不对称），每 1 m/s 转多少 deg/s 量得出来，
+   下发转速时先反着补上，航向环只管剩下的。 */
+#define CHASSIS_HEADING_BRAKE       280.0f // 转向刹车曲线的减速度，deg/s^2
+#define CHASSIS_HEADING_FF_X        0.91f // 前后平移每 1 m/s 补多少转速，deg/s
+#define CHASSIS_HEADING_FF_Y        0.0f // 左右平移每 1 m/s 补多少转速，deg/s
 #define CHASSIS_SETTLE_US           200000U
 #define CHASSIS_YAW_SIGN            1.0f // 校准后使逆时针为正
 
@@ -165,12 +176,19 @@ extern chassis_t chassis;
 
 #define CHASSIS_PATH_CAPACITY     256U
 #define CHASSIS_PATH_DEVIATION_MM 5.0f
+/* 拐角圆弧的向心加速度预算：cap = sqrt(acc_linear × 该系数 × 半径)。
+   0.25 = 原来按 1/4 线加速度算，90° 弯半径约 8 mm → 63 mm/s；1.0 = 按满线加速度算，约 126 mm/s。
+   可用 -DCHASSIS_PATH_CORNER_FACTOR=... 覆盖。 */
+#ifndef CHASSIS_PATH_CORNER_FACTOR
+#define CHASSIS_PATH_CORNER_FACTOR 1.0f
+#endif
 
 /* 运行时可调的参数，字段名就是串口控制台里的参数名（console.c）。上面的宏是开机默认值，
    定稿的值写回宏里。只在底盘任务里读写（控制台也在底盘任务里运行），不需要加锁。 */
 typedef struct
 {
     float heading_kp, heading_ki, heading_i_max, heading_i_zone;
+    float heading_brake, heading_ff_x, heading_ff_y;
     float turn_max_speed;
     float distance_kp, distance_tol, heading_tol, settle_ms;
     float acc_linear, acc_angular;
@@ -180,13 +198,23 @@ typedef struct
 
 #define CHASSIS_TUNE_DEFAULTS                                                                      \
     {                                                                                              \
-        .heading_kp = CHASSIS_HEADING_KP, .heading_ki = CHASSIS_HEADING_KI,                        \
-        .heading_i_max = CHASSIS_HEADING_I_MAX, .heading_i_zone = CHASSIS_HEADING_I_ZONE,          \
-        .turn_max_speed = CHASSIS_TURN_MAX_SPEED, .distance_kp = CHASSIS_DISTANCE_KP,              \
-        .distance_tol = CHASSIS_DISTANCE_TOL_MM, .heading_tol = CHASSIS_HEADING_TOL_DEG,           \
-        .settle_ms = CHASSIS_SETTLE_US / 1000.0f, .acc_linear = CHASSIS_ACC_LINEAR,                \
-        .acc_angular = CHASSIS_ACC_ANGULAR, .cmd_speed = CHASSIS_COMMAND_SPEED_MM_S,               \
-        .wheel_dia = CHASSIS_WHEEL_DIA_MM, .chassis_k = CHASSIS_K_MM,                              \
+        .heading_kp = CHASSIS_HEADING_KP,                                                          \
+        .heading_ki = CHASSIS_HEADING_KI,                                                          \
+        .heading_i_max = CHASSIS_HEADING_I_MAX,                                                    \
+        .heading_i_zone = CHASSIS_HEADING_I_ZONE,                                                  \
+        .heading_brake = CHASSIS_HEADING_BRAKE,                                                    \
+        .heading_ff_x = CHASSIS_HEADING_FF_X,                                                      \
+        .heading_ff_y = CHASSIS_HEADING_FF_Y,                                                      \
+        .turn_max_speed = CHASSIS_TURN_MAX_SPEED,                                                  \
+        .distance_kp = CHASSIS_DISTANCE_KP,                                                        \
+        .distance_tol = CHASSIS_DISTANCE_TOL_MM,                                                   \
+        .heading_tol = CHASSIS_HEADING_TOL_DEG,                                                    \
+        .settle_ms = CHASSIS_SETTLE_US / 1000.0f,                                                  \
+        .acc_linear = CHASSIS_ACC_LINEAR,                                                          \
+        .acc_angular = CHASSIS_ACC_ANGULAR,                                                        \
+        .cmd_speed = CHASSIS_COMMAND_SPEED_MM_S,                                                   \
+        .wheel_dia = CHASSIS_WHEEL_DIA_MM,                                                         \
+        .chassis_k = CHASSIS_K_MM,                                                                 \
         .path_deviation = CHASSIS_PATH_DEVIATION_MM,                                               \
     }
 

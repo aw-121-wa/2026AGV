@@ -4,6 +4,7 @@
 #include <math.h>
 
 #define LINES_PER_TICK 4U
+#define LOG_HEAD_LINES 4U // LOG begin 加三行 LOG param，后面才是样本
 
 typedef enum
 {
@@ -99,9 +100,14 @@ static void LogSendLine(void)
             ChassisTelemetry_Num(p->settle_ms, 0), ChassisTelemetry_Num(p->acc_linear, 0),
             ChassisTelemetry_Num(p->chassis_k, 2), ChassisTelemetry_Num(p->wheel_dia, 2),
             ChassisTelemetry_Num(p->distance_tol, 2));
-    else if (log_line - 3U < log_count)
+    else if (log_line == 3U)
+        ChassisTelemetry_Printf(
+            "LOG param heading_brake=%s heading_ff_x=%s heading_ff_y=%s max_wheel_rpm=%u\r\n",
+            ChassisTelemetry_Num(p->heading_brake, 0), ChassisTelemetry_Num(p->heading_ff_x, 2),
+            ChassisTelemetry_Num(p->heading_ff_y, 2), (unsigned)CHASSIS_MAX_WHEEL_RPM);
+    else if (log_line - LOG_HEAD_LINES < log_count)
     {
-        unsigned i = log_line - 3U;
+        unsigned i = log_line - LOG_HEAD_LINES;
         const tune_sample *s = &log_samples[i];
         ChassisTelemetry_Printf("L %u %u %u %ld %ld %d %d %d %d\r\n", i, log_modes[i] & 0x0FU,
                                 (unsigned)(log_modes[i] >> 4), (long)s->target, (long)s->yaw,

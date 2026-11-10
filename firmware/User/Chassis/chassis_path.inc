@@ -80,7 +80,8 @@ HAL_StatusTypeDef Chassis_AppendPath(const chassis_waypoint *points, unsigned co
                     float radius = trim * powf(fmaxf(0.001f, (1 + dot) * 0.5f), 1.5f) /
                                    sqrtf(fmaxf(0.001f, (1 - dot) * 0.5f));
                     float cap =
-                        fminf(s_move_speed_limit, sqrtf(chassis_tune.acc_linear * 0.25f * radius));
+                        fminf(s_move_speed_limit, sqrtf(chassis_tune.acc_linear *
+                                                        CHASSIS_PATH_CORNER_FACTOR * radius));
                     for (unsigned j = 0; j <= 8; ++j)
                     {
                         float t = j / 8.0f, r = 1 - t;
@@ -263,7 +264,8 @@ static void Chassis_PathControl(float dt)
     uint8_t translating = (transit || distance > chassis_tune.distance_tol) && distance > 0.001f;
     chassis.target.vx = translating ? speed * (cosf(rad) * ex + sinf(rad) * ey) / distance : 0;
     chassis.target.vy = translating ? speed * (-sinf(rad) * ex + cosf(rad) * ey) / distance : 0;
-    chassis.target.wz = Chassis_HeadingControl(dt, distance <= chassis_tune.distance_tol);
+    /* 途经点（transit）离得再近也还在平移：按“停着”算会在高速经过时清积分、撤掉航向修正。 */
+    chassis.target.wz = Chassis_HeadingControl(dt, !translating);
     if (translating)
     {
         float error = fabsf(chassis.heading_error);

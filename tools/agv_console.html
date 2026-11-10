@@ -248,6 +248,7 @@ body[data-mode=SURVEY] #map { cursor: default; }
 .tune-table td.better { color: var(--ok); font-weight: 600; }
 .tune-table td.worse { color: var(--danger); font-weight: 600; }
 .tune-table td.changed { font-weight: 600; }
+.tune-table td:not(:first-child), .tune-table th:not(:first-child) { white-space: nowrap; }
 pre.macro { margin: 8px 0 0; padding: 6px 8px; background: var(--panel-2); border-radius: 6px; font-size: 12px; overflow-x: auto; }
 
 /* 机械臂 */
@@ -615,8 +616,10 @@ ol.steps li { margin: 2px 0; }
       <section class="panel">
         <h2>自动测试</h2>
         <div class="body">
-          <p class="muted small" style="margin:0 0 6px">车放在地上（轮子离地测不了：车身不转，陀螺仪看不到），周围空出 40 cm。依次原地转 ±5°、±20°、±90°，勾上平移再前后左右各走 300 mm，最后回到原处。每个动作的日志存在这台电脑上。按 Esc 急停。</p>
-          <label class="check"><input id="tuneMoves" type="checkbox" checked>加平移（前后左右各 300 mm）</label>
+          <p class="muted small" style="margin:0 0 6px">车放在地上（轮子离地测不了：车身不转，陀螺仪看不到）。依次原地转 ±5°、±20°、±90°，勾上平移再前后左右各走一段，最后回到原处。每个动作的日志存在这台电脑上。按 Esc 急停。</p>
+          <label class="check"><input id="tuneMoves" type="checkbox" checked>加平移，前后左右各
+            <input id="tuneDistance" type="number" min="100" max="3000" step="100" value="300" style="width:5.5em" aria-label="平移距离 mm"> mm</label>
+          <p id="tuneDistanceHint" class="muted small" style="margin:2px 0 0">车头前方和左边要空出这么远。</p>
           <div class="inline" style="margin-top:6px">
             <button id="tuneStart" class="primary">开始测试</button>
             <button id="tuneAbort" disabled>停止</button>
@@ -663,11 +666,12 @@ ol.steps li { margin: 2px 0; }
             <div title="下发 1°/s 车实际转多少，小于 1 是麦轮打滑"><span>转向增益 K</span><b id="mK">--</b></div>
             <div title="驱动器、电机和车身惯量合起来的一阶时间常数"><span>惯性 ms</span><b id="mTau">--</b></div>
             <div title="CAN、驱动器、陀螺仪加起来的纯延迟"><span>延迟 ms</span><b id="mDelay">--</b></div>
-            <div title="前后平移时车身被带着转的角速度"><span>前后平移扰动</span><b id="mCx">--</b></div>
-            <div title="左右平移时车身被带着转的角速度"><span>左右平移扰动</span><b id="mCy">--</b></div>
-            <div title="模型算的航向和实测差多少（均方根）"><span>拟合误差 °</span><b id="mRms">--</b></div>
+            <div title="转到 180°/s 时的 K：比小转速时小，就是转得快打滑更多"><span>转得快时的 K</span><b id="mKfast">--</b></div>
+            <div title="前后平移每 1 m/s，车身被带着转多少 °/s；± 是把日志轮流去掉一段再拟合，它跟着变多少"><span>前后带偏</span><b id="mCx">--</b></div>
+            <div title="左右平移每 1 m/s，车身被带着转多少 °/s"><span>左右带偏</span><b id="mCy">--</b></div>
+            <div title="模型算的航向和实测差多少（均方根）：只转向的日志 / 有平移的日志"><span>拟合误差 °</span><b id="mRms">--</b></div>
           </div>
-          <p class="muted small" style="margin:6px 0 0">扰动是每 100 mm/s 车速带出来的 °/s。</p>
+          <p id="tuneDriftNote" class="muted small" style="margin:6px 0 0">带偏是平移时车身被带着转的角速度，每 1 m/s 车速多少 °/s；量得稳就能用前馈抵消。</p>
           <div id="tuneWarn" class="alarm"></div>
         </div>
       </section>
@@ -1249,6 +1253,9 @@ const PARAM_INFO = {
   heading_ki: ['航向 Ki', 'heading', '1/s', '消除稳态误差，设 0 同时清掉积分'],
   heading_i_max: ['积分上限', 'heading', '°/s', '积分项的输出上限'],
   heading_i_zone: ['积分区', 'heading', '°', '误差小于此值才积分'],
+  heading_brake: ['刹车曲线', 'heading', '°/s²', '离目标 e 度时比例项最多转 sqrt(2·a·e)，大角度转向快到位时不冲过头；0 = 不用。“自动调参”给推荐值'],
+  heading_ff_x: ['前后前馈', 'heading', '(°/s)/(m/s)', '前后平移每 1 m/s 先补多少转速，抵消平移带偏；0 = 不用。“自动调参”量出来'],
+  heading_ff_y: ['左右前馈', 'heading', '(°/s)/(m/s)', '左右平移每 1 m/s 先补多少转速；0 = 不用。“自动调参”量出来'],
   turn_max_speed: ['最大角速度', 'heading', '°/s', '航向环输出限幅'],
   distance_kp: ['定距 Kp', 'distance', '1/s', '定距移动的比例增益'],
   distance_tol: ['到位容差', 'distance', 'mm', '离目标多近算到位'],
@@ -1416,6 +1423,7 @@ function onSetOk(m) {
   const saved = loadSaved();
   if (p.value === p.def) delete saved[p.name]; else saved[p.name] = p.text;
   storeSaved(saved);
+  if (p.name === 'cmd_speed' || p.name === 'acc_linear') updateTuneDistance();
 }
 
 function onSetFail(name, text) {
@@ -1429,6 +1437,7 @@ function onSetFail(name, text) {
 
 /* 读完 /list 后，检查这台电脑上有没有存过、但固件里没生效的值（固件断电就恢复默认）。 */
 function afterList() {
+  updateTuneDistance();
   const saved = loadSaved();
   const lines = Object.entries(saved)
     .filter(([name, text]) => params.has(name) && params.get(name).text !== text)
@@ -2156,10 +2165,11 @@ function drawMap() {
 
 /* ---------- 自动调参：算法在 pid_tune.js，日志格式见 firmware/User/Comm/tune_log.h ---------- */
 const TUNE_TURNS = ['T5', 'T-5', 'T20', 'T-20', 'T90', 'T-90'];
-const TUNE_MOVES = ['F300', 'B300', 'L300', 'R300'];
 const TUNE_AUTO_KEY = 'agv-console.tune.auto';
 const TUNE_ARRAYS = { motion: Uint8Array, moving: Uint8Array, target: Float64Array, yaw: Float64Array, pid: Float64Array, cmd: Float64Array, vx: Float64Array, vy: Float64Array };
 const TUNE_PARAMS = ['heading_kp', 'heading_ki', 'heading_i_max', 'heading_i_zone', 'turn_max_speed', 'acc_angular', 'heading_tol', 'acc_linear', 'chassis_k', 'wheel_dia'];
+const TUNE_EXT_PARAMS = ['heading_brake', 'heading_ff_x', 'heading_ff_y']; // 刹车曲线、平移前馈：旧固件没有
+const DYNAMIC_TOL = 0.2; // 固件的平移航向验收线 CHASSIS_DYNAMIC_TOL_DEG
 const tune = { parser: window.PidTune ? PidTune.createParser() : null, logs: [], selected: 0, model: null, result: null, baseFrom: '', test: null, waiter: null, db: null, busy: false, hover: null, chart: null, nextId: Date.now() };
 const lineWaiters = [];
 
@@ -2206,7 +2216,30 @@ function describeLog(rec, metrics) {
 
 function metricText(m) {
   const settle = Number.isFinite(m.settle) ? `到位 ${m.settle.toFixed(2)} s` : '没稳住';
-  return m.kind === 'turn' ? `${settle} · 超调 ${m.overshoot.toFixed(2)}°` : `航向最大差 ${m.peakMove.toFixed(2)}° · ${settle}`;
+  return m.kind === 'turn' ? `${settle} · 超调 ${m.overshoot.toFixed(2)}°`
+    : `航向最大差 ${m.peakMove.toFixed(2)}°（均方根 ${m.rmsMove.toFixed(2)}°） · ${settle}` +
+      (m.overrun >= 5 ? ` · 位置冲过头 ${Math.round(m.overrun)} mm 又退回` : '');
+}
+
+/* 自动测试里平移走多远：要有一小段匀速（0.3 s 左右），带偏量才量得准；指令速度 1000 mm/s、加速度 2000 mm/s² 时
+   是 800 mm。没手动改过就跟着指令速度走。 */
+function tuneDistanceWanted() {
+  const v = params.get('cmd_speed')?.value, a = params.get('acc_linear')?.value;
+  if (!v || !a) return 300;
+  return Math.min(3000, Math.max(300, Math.ceil((v * v / a + 0.3 * v) / 100) * 100));
+}
+
+function tuneDistance() {
+  const d = Math.round(Number($('tuneDistance').value) / 10) * 10;
+  return Number.isFinite(d) ? Math.min(3000, Math.max(100, d)) : 300;
+}
+
+function updateTuneDistance() {
+  const want = tuneDistanceWanted(), box = $('tuneDistance');
+  if (!box.dataset.touched) box.value = want;
+  const d = tuneDistance();
+  setText('tuneDistanceHint', `车头前方和左边各空出 ${Math.ceil((d + 300) / 100) * 100} mm。` +
+    (d < want ? `按现在的指令速度至少 ${want} mm 才有一段匀速，短了带偏量量不准。` : ''));
 }
 
 function addTuneLog(rec) {
@@ -2289,7 +2322,10 @@ async function loadTuneLogs() {
   const req = store.getAll();
   req.onsuccess = () => {
     tune.logs = [...req.result, ...tune.logs].sort((a, b) => a.id - b.id);
-    for (const l of tune.logs) tune.nextId = Math.max(tune.nextId, l.id + 1);
+    for (const l of tune.logs) {
+      tune.nextId = Math.max(tune.nextId, l.id + 1);
+      l.metrics = PidTune.recordMetrics(l); // 存的是旧版本算的，指标按现在的算法重算
+    }
     renderTuneLogs();
     updateTuneButtons();
   };
@@ -2361,9 +2397,10 @@ function stopTuneTest(reason) {
 
 async function runTuneTest(kind) {
   if (!window.PidTune || tune.test || !app.port || app.running) return;
-  const moves = $('tuneMoves').checked;
-  const steps = moves ? [...TUNE_TURNS, ...TUNE_MOVES] : [...TUNE_TURNS];
-  if (!confirm(`车会自己动：原地左右转（最大 90°）${moves ? '，再前后左右各走 300 mm' : ''}，最后回到原处。确认车放在地上、周围空出 40 cm？中途按 Esc 急停。`)) return;
+  const moves = $('tuneMoves').checked, d = tuneDistance();
+  const steps = moves ? [...TUNE_TURNS, `F${d}`, `B${d}`, `L${d}`, `R${d}`] : [...TUNE_TURNS];
+  if (!confirm(`车会自己动：原地左右转（最大 90°）${moves ? `，再前后左右各走 ${d} mm` : ''}，最后回到原处。确认车放在地上、` +
+    `${moves ? `车头前方和左边各空出 ${Math.ceil((d + 300) / 100) * 100} mm` : '周围空出 40 cm'}？中途按 Esc 急停。`)) return;
   const test = tune.test = { id: Date.now(), kind, steps, index: 0, current: '', records: [], stop: false, reason: '' };
   const plotGroup = plot.group;
   if (plotGroup) send('/plot off'); // 曲线流和日志抢串口
@@ -2379,10 +2416,12 @@ async function runTuneTest(kind) {
     const reply = await ack;
     if (test.stop) break;
     if (!reply || !reply.startsWith('OK')) { problem = reply ? `固件没接受 ${cmd}：${reply}` : `${cmd} 发出去没有回复`; break; }
-    const r = await waitTuneEvent(30000);
+    // 走得慢、走得远的平移要等久一点：动作本身 + 最多 10 s 的日志传回来
+    const wait = 30 + (/^[FBLR]/.test(cmd) ? 2 * d / Math.max(params.get('cmd_speed')?.value || 100, 10) : 0);
+    const r = await waitTuneEvent(wait * 1000);
     if (test.stop) break;
     if (!r || r.kind !== 'record') {
-      problem = !r ? `${cmd} 的日志 30 秒内没收到` : r.kind === 'abort' ? `${cmd} 的日志作废了（中途又动了）` : `${cmd} 的日志缺行，串口可能丢字`;
+      problem = !r ? `${cmd} 的日志 ${Math.round(wait)} 秒内没收到` : r.kind === 'abort' ? `${cmd} 的日志作废了（中途又动了）` : `${cmd} 的日志缺行，串口可能丢字`;
       break;
     }
     if (r.record.end !== 'done') { problem = `${cmd} 没有正常走完（${r.record.end === 'fault' ? '底盘故障' : '被停下了'}）`; break; }
@@ -2403,6 +2442,7 @@ async function runTuneTest(kind) {
 }
 
 /* ---- 训练：拟合模型，在模型上搜参数 ---- */
+/* 车上现在的航向环参数；没连车（没读到）返回 null。刹车曲线和前馈旧固件没有，有才带上。 */
 function liveParams() {
   const out = {};
   for (const name of TUNE_PARAMS) {
@@ -2410,6 +2450,7 @@ function liveParams() {
     if (!p) return null;
     out[name] = p.value;
   }
+  for (const name of TUNE_EXT_PARAMS) if (params.has(name)) out[name] = params.get(name).value;
   return out;
 }
 
@@ -2434,9 +2475,10 @@ async function trainTune() {
     tune.result = null;
     renderModel();
     if (tune.model.ok) {
-      const live = liveParams();
+      const live = liveParams(), last = recs[recs.length - 1].params;
       tune.baseFrom = live ? '车上现在' : '最新日志';
-      const base = PidTune.gainsFromParams(live || recs[recs.length - 1].params);
+      // 轮速上限是编译进固件的，/set 读不到，只在日志里有
+      const base = PidTune.gainsFromParams(live ? { ...live, max_wheel_rpm: last.max_wheel_rpm } : last);
       tune.result = await PidTune.optimize(tune.model, base, {
         speed: moveSpeed(recs), onProgress: f => { $('tuneTrainBar').style.width = `${5 + 95 * f}%`; },
       });
@@ -2457,12 +2499,21 @@ async function trainTune() {
 function renderModel() {
   const m = tune.model, p = m?.plant;
   const f = (v, d) => (p && Number.isFinite(v) ? v.toFixed(d) : '--');
+  // 带偏量：每 1 m/s 多少 °/s，± 标准误差；这个方向没平移过就没有
+  const drift = a => (!a ? '--' : !a.seen ? '没测' : `${(a.c * 1000).toFixed(1)} ± ${Number.isFinite(a.se) ? (a.se * 1000).toFixed(1) : '?'}`);
   setText('mK', f(p?.K, 3));
+  setText('mKfast', p && p.kq ? (p.K + 1.8 * p.kq).toFixed(3) : '--');
   setText('mTau', f(p?.tau * 1000, 1));
   setText('mDelay', f(p?.delay * 1000, 1));
-  setText('mCx', f(p?.cx * 100, 2));
-  setText('mCy', f(p?.cy * 100, 2));
-  setText('mRms', m && Number.isFinite(m.rms) ? m.rms.toFixed(3) : '--');
+  setText('mCx', drift(m?.drift?.x));
+  setText('mCy', drift(m?.drift?.y));
+  setText('mRms', m?.ok ? `${m.rmsTurn.toFixed(3)} / ${m.rmsMove.toFixed(3)}` : m && Number.isFinite(m.rms) ? m.rms.toFixed(3) : '--');
+  const notes = [];
+  for (const [axis, label] of [['x', '前后'], ['y', '左右']]) {
+    const a = m?.drift?.[axis];
+    if (a?.seen) notes.push(`${label}平移时的航向偏差 ${Math.round(a.explained * 100)}% 是带偏（${a.use ? '稳，可以前馈' : '不稳'}），其余是地面、打滑这些随机的。`);
+  }
+  setText('tuneDriftNote', '带偏是平移时车身被带着转的角速度，每 1 m/s 车速多少 °/s；量得稳就能用前馈抵消。' + notes.join(''));
   const warn = $('tuneWarn');
   warn.textContent = m ? m.warnings.join(' ') : '';
   warn.className = 'alarm' + (m && !m.ok ? ' fault' : m?.warnings.length ? ' wait' : '');
@@ -2482,6 +2533,16 @@ function compareClass(now, next) {
   return next < now * 0.97 - 1e-3 ? 'better' : next > now * 1.03 + 1e-3 ? 'worse' : '';
 }
 
+/* 推荐表的一行：名字、推荐结果里的键、固件参数名、chassis.h 的宏、小数位、是不是新固件才有。 */
+const TUNE_ROWS = [
+  ['航向 Kp', 'kp', 'heading_kp', 'CHASSIS_HEADING_KP', 2, false],
+  ['航向 Ki', 'ki', 'heading_ki', 'CHASSIS_HEADING_KI', 2, false],
+  ['积分上限 °/s', 'iMax', 'heading_i_max', 'CHASSIS_HEADING_I_MAX', 1, false],
+  ['刹车曲线 °/s²', 'brake', 'heading_brake', 'CHASSIS_HEADING_BRAKE', 0, true],
+  ['前后前馈 (°/s)/(m/s)', 'ffx', 'heading_ff_x', 'CHASSIS_HEADING_FF_X', 2, true],
+  ['左右前馈 (°/s)/(m/s)', 'ffy', 'heading_ff_y', 'CHASSIS_HEADING_FF_Y', 2, true],
+];
+
 function renderRecommendation() {
   const r = tune.result;
   const gains = $('tuneGains').tBodies[0], predict = $('tunePredict').tBodies[0];
@@ -2493,44 +2554,55 @@ function renderRecommendation() {
     setText('tuneSummary', tune.model && !tune.model.ok ? '模型不可信，没给推荐值。' : '训练以后在这里出推荐值。');
     return;
   }
-  const now = r.current, best = r.best, p = tune.model.plant, from = tune.baseFrom;
+  const now = r.current, best = r.best, p = tune.model.plant, from = tune.baseFrom, ext = now.gains.ext;
   const pct = Math.round((1 - best.score / now.score) * 100);
+  const notes = [];
+  if (r.unchanged) notes.push('现在的参数已经在最好的 2% 以内，不用改。');
+  if (!ext) notes.push(`${from === '车上现在' ? '车上的固件' : '这些日志的固件'}没有刹车曲线和平移前馈，这次只调了 kp、ki：平移时的航向误差主要靠前馈压，刷了新固件再测一遍。`);
+  for (const axis of r.dropped) notes.push(`${axis === 'x' ? '前后' : '左右'}前馈放到回放的实测上反而更差，没用它。`);
   setText('tuneSummary', `用 ${tune.model.records} 段日志拟合的模型，和${from === '车上现在' ? '车上现在的参数' : '最新一段日志里的参数（没连车）'}比，` +
-    `在 ${r.plants} 辆参数随机变化的车上打分（到位时间加上超调、平移误差折算，越小越好）：${now.score.toFixed(2)} → ${best.score.toFixed(2)}，` +
-    `${pct >= 0 ? `好 ${pct}%` : `差 ${-pct}%`}。`);
+    `在 ${r.plants} 辆参数随机变化的车上打分（转向的到位时间和超调、平移时的航向误差折成秒，越小越好）：${now.score.toFixed(2)} → ${best.score.toFixed(2)}` +
+    `${r.unchanged ? '' : `，${pct >= 0 ? `好 ${pct}%` : `差 ${-pct}%`}`}。${notes.join('')}`);
   tableRow(gains, ['参数', from, '推荐'], true);
-  for (const [label, key, digits] of [['航向 Kp', 'kp', 2], ['航向 Ki', 'ki', 2], ['积分上限 °/s', 'iMax', 1]])
+  for (const [label, key, , , digits, needsExt] of TUNE_ROWS) {
+    if (needsExt && !ext) { tableRow(gains, [label, '固件没有', '--']); continue; }
     tableRow(gains, [label, now.gains[key].toFixed(digits), best.gains[key].toFixed(digits)], false,
       ['', '', best.gains[key] !== now.gains[key] ? 'changed' : '']);
+  }
   tableRow(predict, ['模型预测', from, '推荐'], true);
-  const fs = v => (Number.isFinite(v) ? `${v.toFixed(2)} s` : '没到位');
+  const fs = v => (Number.isFinite(v) ? `${v.toFixed(2)} s` : '没到位'), deg = v => `${v.toFixed(2)}°`;
+  // 差得很小的不标颜色：超调 0.05°、航向差 0.02°、停稳 0.05 s 以内都算一样
+  const row = (label, a, b, text, floor) => tableRow(predict, [label, text(a), text(b)], false, ['', '', compareClass(Math.max(a, floor), Math.max(b, floor))]);
   now.nominal.forEach((a, i) => {
     const b = best.nominal[i];
-    tableRow(predict, [`${a.label} 到位`, fs(a.settle), fs(b.settle)], false, ['', '', compareClass(a.settle, b.settle)]);
-    if (a.kind === 'turn')
-      tableRow(predict, [`${a.label} 超调`, `${a.overshoot.toFixed(2)}°`, `${b.overshoot.toFixed(2)}°`], false,
-        ['', '', compareClass(Math.max(a.overshoot, 0.05), Math.max(b.overshoot, 0.05))]);
-    else
-      tableRow(predict, [`${a.label} 航向最大差`, `${a.peakMove.toFixed(2)}°`, `${b.peakMove.toFixed(2)}°`], false,
-        ['', '', compareClass(a.peakMove, b.peakMove)]);
+    if (a.kind === 'turn') {
+      row(`${a.label} 到位`, a.settle, b.settle, fs, 0);
+      row(`${a.label} 超调`, a.overshoot, b.overshoot, deg, 0.05);
+    } else {
+      row(`${a.label} 航向差`, a.peakMove, b.peakMove, deg, 0.02);
+      if (a.kind === 'long') row(`${a.label} 停稳`, a.tail, b.tail, fs, 0.05);
+    }
   });
-  tableRow(predict, ['最差的那辆车', now.worst.toFixed(2), best.worst.toFixed(2)], false, ['', '', compareClass(now.worst, best.worst)]);
+  tableRow(predict, ['最差那辆车的分数', now.worst.toFixed(2), best.worst.toFixed(2)], false, ['', '', compareClass(now.worst, best.worst)]);
   const gm = m => (Number.isFinite(m.gm) ? `${m.gm.toFixed(1)} dB` : '无限');
-  setText('tuneMargin', `推荐值的相位裕度 ${best.margins.pm.toFixed(0)}°、增益裕度 ${gm(best.margins)}（${from}：${now.margins.pm.toFixed(0)}°、${gm(now.margins)}）。只看小误差的线性化结果，限幅和积分区不算在内。`);
+  setText('tuneMargin', `航向差是平移那段时间里航向离目标最远多少。“回放”是把日志里平移时的航向扰动原样加回去、换成这组参数重算；` +
+    `“走 x m”是模型按指令速度走一段带匀速的长距离；停稳是平移停下以后多久航向回到容差里。` +
+    `推荐值的相位裕度 ${best.margins.pm.toFixed(0)}°、增益裕度 ${gm(best.margins)}（${from}：${now.margins.pm.toFixed(0)}°、${gm(now.margins)}），` +
+    `只看小误差的线性化结果，限幅、积分区和刹车曲线不算在内。`);
   $('tuneMacro').textContent =
     `/* User/Chassis/chassis.h，自动调参推荐：K=${p.K.toFixed(3)} 惯性 ${(p.tau * 1000).toFixed(0)} ms 延迟 ${(p.delay * 1000).toFixed(0)} ms */\n` +
-    `#define CHASSIS_HEADING_KP    ${best.gains.kp.toFixed(2)}f\n` +
-    `#define CHASSIS_HEADING_KI    ${best.gains.ki.toFixed(2)}f\n` +
-    `#define CHASSIS_HEADING_I_MAX ${best.gains.iMax.toFixed(1)}f`;
+    TUNE_ROWS.filter(item => ext || !item[5])
+      .map(([, key, , macro, digits]) => `#define ${macro.padEnd(27)} ${best.gains[key].toFixed(Math.max(digits, 1))}f`).join('\n');
 }
 
 function applyTune() {
   const g = tune.result?.best.gains;
   if (!g || !app.port) return;
   const missing = [];
-  for (const [name, value] of [['heading_kp', g.kp], ['heading_ki', g.ki], ['heading_i_max', g.iMax]]) {
+  for (const [, key, name, , , needsExt] of TUNE_ROWS) {
+    if (needsExt && !g.ext) continue;
     const p = params.get(name);
-    if (p) commitParam(p, String(value)); else missing.push(name);
+    if (p) commitParam(p, String(g[key])); else missing.push(name);
   }
   setTuneState(missing.length ? `固件里没读到这些参数：${missing.join('、')}，先到调试台点“读取”。`
     : '发给固件了。固件断电会恢复默认（调试台记着，重连时提示写回）；定稿后把右边的宏写回 chassis.h。');
@@ -2542,7 +2614,7 @@ function showVerify(records) {
   body.replaceChildren();
   if (!tune.model?.ok) { setText('tuneVerifyNote', '先训练出模型再验证。'); return; }
   tableRow(body, ['动作', '预测', '实测'], true);
-  let total = 0, close = 0;
+  let total = 0, close = 0, moves = 0, inSpec = 0, worst = 0;
   const fs = v => (Number.isFinite(v) ? `${v.toFixed(2)} s` : '没到位');
   for (const rec of records) {
     for (const row of PidTune.verify([rec], tune.model.plant)) {
@@ -2552,12 +2624,18 @@ function showVerify(records) {
         : Math.abs(pred.peakMove - real.peakMove) <= Math.max(0.1, 0.3 * real.peakMove);
       ++total;
       if (ok) ++close;
+      if (row.kind === 'move') {
+        ++moves;
+        worst = Math.max(worst, real.peakMove);
+        if (real.peakMove <= DYNAMIC_TOL) ++inSpec;
+      }
       const name = rec.label.split(' · ')[0].replace('验证 ', '');
       if (row.kind === 'turn') tableRow(body, [`${name} 到位`, fs(pred.settle), fs(real.settle)], false, ['', '', ok ? '' : 'worse']);
       else tableRow(body, [`${name} 航向最大差`, `${pred.peakMove.toFixed(2)}°`, `${real.peakMove.toFixed(2)}°`], false, ['', '', ok ? '' : 'worse']);
     }
   }
-  setText('tuneVerifyNote', `${close}/${total} 个动作预测和实测对得上（转向到位时间差在 25% 或 0.15 s 以内，平移误差差在 30% 或 0.1° 以内）。` +
+  setText('tuneVerifyNote', (moves ? `平移 ${moves} 段，实测航向最大差 ${worst.toFixed(2)}°，${inSpec} 段在验收线 ${DYNAMIC_TOL}° 以内。` : '') +
+    `${close}/${total} 个动作预测和实测对得上（转向到位时间差在 25% 或 0.15 s 以内，平移误差差在 30% 或 0.1° 以内）。` +
     (close < total ? '对不上的多就把这次的日志也勾上（已经默认勾上了）再训练一次。' : '模型可信，推荐值可以定稿写回 chassis.h。'));
 }
 
@@ -3407,6 +3485,7 @@ $('tuneStart').addEventListener('click', () => runTuneTest('test'));
 $('tuneVerify').addEventListener('click', () => runTuneTest('verify'));
 $('tuneAbort').addEventListener('click', () => { send('S'); stopTuneTest('按了停止'); });
 $('tuneTrain').addEventListener('click', trainTune);
+$('tuneDistance').addEventListener('change', () => { $('tuneDistance').dataset.touched = '1'; updateTuneDistance(); });
 $('tuneApply').addEventListener('click', applyTune);
 $('tuneSelectAll').addEventListener('click', () => {
   const all = tune.logs.every(l => l.use);
@@ -3525,6 +3604,7 @@ requestAnimationFrame(plotLoop);
 try { $('tuneAuto').checked = localStorage.getItem(TUNE_AUTO_KEY) === '1'; } catch { /* 无痕窗口：默认关 */ }
 if (window.PidTune) loadTuneLogs();
 else setTuneState('找不到 pid_tune.js：它要和 agv_console.html 放在同一个文件夹。');
+updateTuneDistance();
 </script>
 </body>
 </html>

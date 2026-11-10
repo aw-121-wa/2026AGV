@@ -82,6 +82,7 @@ static uint32_t s_settle_us;
 static float s_goal_x, s_goal_y;
 static float s_move_speed_limit = CHASSIS_MOVE_MAX_SPEED;
 static float s_heading_integral;
+static uint8_t s_heading_stationary; // 上一拍航向环是按“没在平移”算的
 static uint8_t s_heading_hold;
 static uint8_t s_recover;     // 1 = S 已请求清故障，正在解除保护/重新使能
 static uint32_t s_recover_ms; // 清故障开始时间
@@ -418,10 +419,16 @@ static void Chassis_UpdateOdometry(void)
     chassis.pos_y += sinf(rad) * dx + cosf(rad) * dy;
 }
 
-/* 小误差 PI 修正并限制积分；进入静态容差后撤去修正以便停稳。 */
+/* 小误差 PI 修正并限制积分；进入静态容差后撤去修正以便停稳。
+   heading_brake > 0 时比例项不超过刹车曲线（见 chassis.h），积分不受它限制。 */
 static float Chassis_HeadingControl(float dt, uint8_t stationary)
 {
     float error = chassis.heading_error;
+    /* 平移刚停下的那一拍清积分：积分里攒的是顶平移扰动的量，车一停扰动就没了，留着它和比例项
+       对着干，车头要好几秒才回得来（1.5 m 横移后实测仿真 4 s）。 */
+    if (stationary && !s_heading_stationary)
+        s_heading_integral = 0.0f;
+    s_heading_stationary = stationary;
     if (stationary && fabsf(error) <= chassis_tune.heading_tol)
     {
         s_heading_integral = 0.0f;
@@ -433,8 +440,10 @@ static float Chassis_HeadingControl(float dt, uint8_t stationary)
                                         chassis_tune.heading_i_max);
     else
         s_heading_integral = 0.0f;
-    return Math_Clamp(chassis_tune.heading_kp * error + s_heading_integral,
-                      chassis_tune.turn_max_speed);
+    float p = chassis_tune.heading_kp * error;
+    if (chassis_tune.heading_brake > 0.0f)
+        p = Math_Clamp(p, sqrtf(2.0f * chassis_tune.heading_brake * fabsf(error)));
+    return Math_Clamp(p + s_heading_integral, chassis_tune.turn_max_speed);
 }
 
 #include "chassis_path.inc"
@@ -700,8 +709,10 @@ void Chassis_Update(void)
     chassis.current.vy = Chassis_Ramp(chassis.current.vy, chassis.target.vy, step_lin);
     chassis.current.wz = Chassis_Ramp(chassis.current.wz, chassis.target.wz, step_ang);
 
-    /* ---- 8. 解算 + 限幅 ---- */
-    Chassis_Solve(&chassis.current, chassis.wheel_rpm_x10);
+    /* ---- 8. 平移前馈 + 解算 + 限幅 ---- */
+    chassis_vel out = chassis.current;
+    out.wz += (chassis_tune.heading_ff_x * out.vx + chassis_tune.heading_ff_y * out.vy) * 0.001f;
+    Chassis_Solve(&out, chassis.wheel_rpm_x10);
 
     /* ---- 9. 下发 ---- */
     Chassis_Apply();

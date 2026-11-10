@@ -535,7 +535,8 @@ int main(void)
     unsigned triggers = sync_triggers;
     Chassis_SetVelocity(100, 0, 0);
     tick(1);
-    assert(sync_triggers == triggers + 1 && output[0] > 0 && output[0] == output[1]);
+    // 直行时四轮命令应一致；航向环还给一点 wz，四舍五入到 0.1 RPM 后允许差 1 个最小单位
+    assert(sync_triggers == triggers + 1 && output[0] > 0 && fabsf(output[0] - output[1]) <= 0.2f);
     Chassis_SetVelocity(100, 0, 0);
     tick(1);
     fail_send = 1;

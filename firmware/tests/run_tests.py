@@ -41,14 +41,15 @@ def run(name, sources, defines=(), args=()):
     subprocess.run([str(exe)] + list(args), cwd=ROOT, check=True, timeout=60)
 
 
-def node_tests(fixture):
-    """调试台的调参算法（tools/pid_tune.js）：用 tune_log_test 记下的假车日志检查。"""
+def node_tests(fixture, bench):
+    """调试台的调参算法（tools/pid_tune.js）：用 tune_log_test 记下的假车日志检查，再把推荐值放回
+    假车上跑（tune_log_test --bench），看是不是真的比原来准。"""
     try:
         subprocess.run(['node', '--version'], capture_output=True, check=True)
     except (OSError, subprocess.CalledProcessError):
         print('SKIP tools/pid_tune_test.js: node not found')
         return
-    subprocess.run(['node', str(ROOT.parent / 'tools' / 'pid_tune_test.js'), str(fixture)],
+    subprocess.run(['node', str(ROOT.parent / 'tools' / 'pid_tune_test.js'), str(fixture), str(bench)],
                    cwd=ROOT, check=True, timeout=300)
 
 
@@ -61,7 +62,8 @@ def main():
     run('console_test@noimu', [], ['-DCHASSIS_USE_IMU=0'])
     fixture = BUILD / 'tune_fixture.log'
     run('tune_log_test', [], args=[str(fixture)])
-    node_tests(fixture)
+    bench = BUILD / ('tune_log_test.exe' if os.name == 'nt' else 'tune_log_test')
+    node_tests(fixture, bench)
     for mode in range(4):
         run('mode_test@' + str(mode), [], ['-DAGV_MODE=' + str(mode)])
     run('survey_loop_test', NAV + ['User/App/agv_run.c'], ['-DAGV_MODE=1'])

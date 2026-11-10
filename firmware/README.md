@@ -43,7 +43,7 @@ Flash 128 KB，DTCM 128 KB，AXI SRAM（`0x24000000`）512 KB，SRAM1~3（`0x300
 
 - 驱动器出厂 CAN 波特率是 500 K，**每台都要在菜单里把 `CAN_Baud` 改成 1M**（手册选项 09），否则收不到任何回复。
 - 总线两端各接 120 Ω 终端电阻；四台电机并联在同一对 CANH/CANL 上。
-- 轮径 77 mm、轴距 210 mm、轮距 230.4 mm 都是卡尺实测值，在 `chassis.h` 顶部修改。
+- 轮径 78.16 mm（卡尺 77.0，按“F2400 实走 2436 mm”标定过，里程和速度一起修正）、轴距 210 mm、轮距 230.4 mm 都在 `chassis.h` 顶部修改。
 
 ---
 
@@ -131,7 +131,7 @@ tests/host/                   PC 端单元测试 + 假 HAL
 | AGV_MODE | 含义 |
 |---|---|
 | 0 COMMAND | 串口指令模式，底盘按 USART6 命令走（`CHASSIS_COMMAND_SPEED_MM_S`，默认 1000 mm/s） |
-| 1 SURVEY | 纯底盘跑全图巡检，READY 且等待 3 s 后自动出发（`AGV_SURVEY_SPEED_MM_S`，默认 400 mm/s） |
+| 1 SURVEY | 纯底盘跑全图巡检，READY 且等待 3 s 后自动出发（`AGV_SURVEY_SPEED_MM_S`，默认 1200 mm/s，原 400 的 3 倍） |
 | 2 COMPETITION | 开局流程（`/start`，见 9.6 节）：雷达扫全图、读任务码；取放料流程待接入。流程没跑时底盘可以用串口命令手动开 |
 | 3 ARM | 机械臂模式（13 节）：底盘一直停着、轮子锁住，`F/B/L/R/T/A/W` 一律 `BUSY`；`/arm` 命令和调试台“机械臂”页标定点位、点动、跟随物料，`S` 停机械臂 |
 
@@ -147,7 +147,7 @@ WAIT ──READY+3s──> DOCK_OUT ──> PLAN(需要时) ──> DRIVE ──
 - `DOCK_OUT`：出发区中心 → 通道口（两段 L 形），并为整圈航点做碰撞预检。
 - `DRIVE`：逐段规划（通道内无碰撞直接走直线，否则在走廊内做 A*），把航点**累积**成一条路径。
 - `DOCK_IN`：航点全部就绪后一次性 `Chassis_FollowPath()` 执行整圈，随后入库。
-- `executing` 期间持续检查：偏线 > 8 mm、地图版本变化、位姿越界、整圈总超时。
+- `executing` 期间持续检查：偏线 > `AGV_CROSS_TRACK_MM`（默认 40 mm）、地图版本变化、位姿越界、整圈总超时。
 - 完成后 `agv.covered` 是规划覆盖的通道位图，`agv.home_residual_mm` 是里程计回库残差（只上报，不判故障）。
 
 ---
@@ -288,13 +288,13 @@ ERR  bad command 'Q' (H for help)
 | 下一拍 | `heading_i_zone` | 8 | 0~180 | 误差小于此值才积分，度 |
 | 下一拍 | `turn_max_speed` | 180 | 1~240 | 航向环输出限幅，deg/s |
 | 下一拍 | `distance_kp` | 1.5 | 0.1~10 | 定距 P 增益，1/s |
-| 下一拍 | `distance_tol` | 3 | 0.5~50 | 到位容差，mm |
+| 下一拍 | `distance_tol` | 1 | 0.5~50 | 到位容差，mm |
 | 下一拍 | `heading_tol` | 0.1 | 0.01~10 | 航向到位容差，度 |
 | 下一拍 | `settle_ms` | 200 | 0~2000 | 停稳多久算完成，ms |
 | 下一拍 | `acc_linear` | 2000 | 100~5000 | 线加速度，mm/s² |
 | 下一拍 | `acc_angular` | 720 | 30~3000 | 角加速度，deg/s² |
 | 下一条路径 | `cmd_speed` | 1000 | 10~2000 | 串口移动命令的速度，mm/s；正在走的路径保持原限速 |
-| 只能停车改 | `wheel_dia` | 77 | 40~150 | 轮径，mm（标定里程计） |
+| 只能停车改 | `wheel_dia` | 78.16 | 40~150 | 轮径，mm（标定里程计；卡尺 77.0，按实走 1.5% 偏差标定） |
 | 只能停车改 | `chassis_k` | 220.2 | 100~400 | 旋转半径系数，(轴距+轮距)/2，mm |
 | 只能停车改 | `path_deviation` | 5 | 0.5~50 | 拐角允许偏差，mm |
 | 下一个雷达点（比赛模式） | `lidar_x`、`lidar_y` | -155、155 | ±200 | 雷达伸出去扫描时的安装位置，mm（默认左后角外） |
@@ -363,7 +363,7 @@ python -m http.server 8000
 - **同步下发**：四个轮速带同步标志入队（`ZDT_SYNC_CACHE`），再广播一次 `00 FF 66 6B` 同时生效；命令变化才发，另有 100 ms 兜底重发。
 - **里程计**：每 20 ms 同时读四轮位置，四轮都更新后才用位置差分累加位移；采样时刻存在 `s_odom_sample_ms[]`，用于 PATH 模式的 40 ms 内预测。
 - **航向**：IMU 帧带接收时间戳，超过 500 ms 没新帧就判反馈失效。
-- **连续路径**：拐角用二次贝塞尔在两侧各裁 `min(2×容差, 0.25×段长)`，入弯/出弯按向心加速度限速；推进条件是 `距离 ≤ 0.15 mm` 或 `已越过且距离 < 1 mm`，因此 2 mm 间距的航点也不会被跳过，全程不会每段停车。
+- **连续路径**：拐角用二次贝塞尔在两侧各裁 `min(2×容差, 0.25×段长)`，入弯/出弯按向心加速度限速；推进条件是 `距离 ≤ 0.15 mm` 或 `已越过且距离 < 1 mm`，因此 2 mm 间距的航点也不会被跳过。圆弧那段的速度上限是 `sqrt(acc_linear × 拐角系数 × 半径)`，系数 `CHASSIS_PATH_CORNER_FACTOR` 现在取 1.0（按满线加速度算），90° 弯半径约 8 mm → 约 126 mm/s。**跑图默认 `AGV_STOP_EACH_SEGMENT=1`，不插圆弧、每个航点停稳再走**：90° 拐角上 LF/RR 要从 +v 走到 -v，连续过弯时是在车还动着的时候穿过 0 RPM，带负载会触发驱动器堵转保护；仿真圈速 23.6 s（连续过弯 20.9 s）。
 - **偏线统计**：每个内部点记着自己属于哪个原始航点（`s_path_vertex`），偏线只量控制器正在走的那几段原始折线，含拐角两侧，所以贝塞尔裁掉的部分也算在内。不按位置找最近段：巡检路线会重复经过同一条边，那样会匹配到后面重合的段。参考点满 257 个时丢已走过的点；万一当前段被挤掉，退回量当前弦长并置截断标志。
 - **A***：障碍只改构型空间位图（每格 10 mm），搜索窗口只清窗口内的表，每拍 32 节点，控制节拍不会被大块 memset 打断。
 - **巡检路线**：12 条通道 = 3×3 网格的 12 条边，奇度点（4 个中点）两两配最短路径补 4 条重复边，得到 16 段欧拉回路，回到出发点。
@@ -383,10 +383,11 @@ cmake --preset Release -DAGV_MODE=1 -DAGV_START_ZONE=2 -DAGV_SURVEY_LAPS=2
 | `AGV_MODE` | 0 | 运行模式 0~3（3 节） |
 | `AGV_START_ZONE` | 1 | 出发区 1 或 2 |
 | `AGV_SURVEY_LAPS` | 1 | 巡检圈数 1~8，只有最后一圈入库 |
-| `AGV_STOP_EACH_SEGMENT` | 0 | 1 = 逐段停车（对照用），0 = 连续过弯 |
-| `AGV_SURVEY_SPEED_MM_S` | 400 | 巡检速度；可 `-D` 覆盖，运行时钳位到 10~2000 |
+| `AGV_STOP_EACH_SEGMENT` | 1 | 1 = 每个航点停稳再走（默认，避免换向时轮子过零被驱动器判堵转），0 = 连续过弯（贝塞尔圆弧，对照用） |
+| `AGV_SURVEY_SPEED_MM_S` | 1200 | 巡检速度（原 400 的 3 倍，跟指令模式一样快）；可 `-D` 覆盖，运行时钳位到 10~2000 |
+| `CHASSIS_PATH_CORNER_FACTOR` | 1.0 | 拐角圆弧的向心加速度预算，`cap = sqrt(acc_linear × 系数 × 半径)`；0.25 = 原来 63 mm/s，1.0 = 126 mm/s |
 | `AGV_POSITION_TOL_MM` | 5 | 回库定位目标值，**只作统计** |
-| `AGV_CROSS_TRACK_MM` | 8 | 路径跟踪偏线上限 |
+| `AGV_CROSS_TRACK_MM` | 40 | 路径跟踪偏线故障阈值（原 8，按 400 mm/s 整定；1200 mm/s 刹车的几十毫米过冲会误报） |
 | `AGV_HEADING_FAULT_DEG` / `_MS` | 3.0 / 200 | 航向持续超限多久判故障 |
 | `CHASSIS_USE_IMU` | 1 | 0 = 不接陀螺仪，航向由轮子推算（只用于底盘单测） |
 | `CHASSIS_WHEEL_DIR_LF/RF/LR/RR` | 1 | 电机安装方向，±1；用 `W` 测试后修改 |
@@ -466,7 +467,7 @@ build/format_tools/clang_format/data/bin/clang-format.exe -i User tests/host
 - `S` 会丢弃本行剩余内容、"接收溢出"会丢弃到下一个结束符，这是有意的：宁可丢一行，也不执行半条路径。
 - CAN 必须是 1 Mbps，且电机 `CAN_Baud` 要逐台改；否则轮子完全不动。
 - 运动中分批发命令时，两批接缝处的拐角没有贝塞尔过渡，只靠出弯限速，理想模型下偏线约 7 mm，超过 5 mm 的拐角容差。要拐得准就写在同一行：`F300 L200`。
-- 车总是停在到位容差的边上：`distance_tol` 默认 3 mm，理想模型下 `F200` 停在 197.2 mm，巡检回库残差约 2.9 mm。要停得更准就调小它。
+- 车总是停在到位容差的边上：`distance_tol` 默认 1 mm，所以长距离会稳定差 1 mm 左右。原来 3 mm 时实测 `F2400` 多走 3 mm 正好是它；要更准就继续调小（0.5 mm 是下限），代价是到位更慢。
 - 雷达在开局流程之后就关了：比赛中途被碰歪、或开局路上一直被挡住的障碍物，车不会知道（见 9.2 节）。
 - 边走边扫一轮约 2 s 才写一次地图：走着时才露出来的障碍物，400 mm/s 下车已经走出去约 800 mm，离得太近就来不及停。第一段路有启停区停着扫的那轮保证；规则里障碍物开局前就摆好，只有被别的东西挡着的才会晚看到。
 - 伸着的雷达按半径 28 mm 的圆算，舵机支架没算：装好以后支架伸出车身的部分要一起量，`COMP_LIDAR_RADIUS_MM` 改大。
@@ -507,7 +508,7 @@ build/format_tools/clang_format/data/bin/clang-format.exe -i User tests/host
 | `CHASSIS_DYNAMIC_TOL_DEG` | 0.2 | 平移期航向误差统计门限（°），超了 `I` 里的 `over_0.2deg` 加一 | 只影响指标，不影响控制 |
 | `CHASSIS_SETTLE_US` | 200000 | 停稳多久算完成（µs） | 完成判据更宽松 |
 | `CHASSIS_DISTANCE_KP` | 1.5 | 定距 P 增益，`1/s` | 定距更快，过大会冲过头 |
-| `CHASSIS_DISTANCE_TOL_MM` | 3.0 | 定距到位容差（mm） | 更容易到位 |
+| `CHASSIS_DISTANCE_TOL_MM` | 1.0 | 定距到位容差（mm） | 更容易到位 |
 
 要改控制结构（加微分、换 PID、改积分抗饱和方式）就动 `Chassis_HeadingControl()` / `Chassis_AutoControl()` 本体。
 
@@ -546,9 +547,9 @@ s_move_speed_limit（指令 100 / 巡检 150，Chassis_SetMoveSpeedLimit 设置�
 
 ### 11.4 现场调速度的顺序
 
-1. `AGV_STOP_EACH_SEGMENT=1` 先跑逐段停车，确认方向和位置都正常（速度放 100~150）。
-2. 改回 `0`，看 `DONE path` 行的 `max_cross` 和 `max_heading`，再逐步加 `AGV_SURVEY_SPEED_MM_S`。
-3. 过弯冲出去（偏线 >8 mm 触发 `AGV_ERR_POSE`）就降速度或降 `CHASSIS_ACC_LINEAR`，不要靠放宽 `AGV_CROSS_TRACK_MM` 掩盖。
+1. 先把 `AGV_SURVEY_SPEED_MM_S` 放低（100~150 mm/s），确认方向和位置都正常。
+2. 逐步加 `AGV_SURVEY_SPEED_MM_S`，看 `DONE path` 行的 `max_cross` 和 `max_heading`。默认 `AGV_STOP_EACH_SEGMENT=1`（每个航点停稳再走），连续过弯只在驱动器堵转保护能关掉时再用。
+3. 过弯冲出去触发 `AGV_ERR_POSE`（上位机显示“偏线过大或位置越界”）就降速度或降 `CHASSIS_ACC_LINEAR`；`AGV_CROSS_TRACK_MM` 现在默认 40 mm 是给 1200 mm/s 的实车过冲留的余量，不要再往上加。
 4. 轮子打滑/丢步先查 `ZDT_RxDropped()` 和驱动器的堵转标志，再谈调参。
 
 ### 11.5 自动调参（调试台“自动调参”）

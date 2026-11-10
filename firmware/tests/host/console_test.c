@@ -283,7 +283,7 @@ static void TestRampsFollowParameters(void)
     AssertNear(chassis.current.wz, 1.0f, 0.05f);
 }
 
-/* 拐角限速 = sqrt(加速度 / 4 × 允许偏差)，见 chassis_path.inc。 */
+/* 拐角限速 = sqrt(acc_linear × CHASSIS_PATH_CORNER_FACTOR × 拐角半径)，见 chassis_path.inc。 */
 static void TestCornerSpeedFollowsParameters(void)
 {
     Begin();
@@ -293,7 +293,8 @@ static void TestCornerSpeedFollowsParameters(void)
     float low = 1e9f;
     for (unsigned i = 0; i < s_path_count; ++i)
         low = fminf(low, s_path_limit[i]);
-    AssertNear(low, 22.36f, 0.05f);
+    // 90° 弯、偏差 1 mm：半径 = 偏差 = 1 mm
+    AssertNear(low, sqrtf(CHASSIS_ACC_LINEAR * CHASSIS_PATH_CORNER_FACTOR * 1.0f), 0.05f);
 
     Begin();
     Line("/set acc_linear 500");
@@ -301,7 +302,8 @@ static void TestCornerSpeedFollowsParameters(void)
     low = 1e9f;
     for (unsigned i = 0; i < s_path_count; ++i)
         low = fminf(low, s_path_limit[i]);
-    AssertNear(low, 25.0f, 0.05f);
+    // /reset 把偏差恢复成默认 5 mm：半径 = 5 mm
+    AssertNear(low, sqrtf(500.0f * CHASSIS_PATH_CORNER_FACTOR * 5.0f), 0.05f);
 }
 
 /* 拐角内部全程按拐角限速。path_deviation 调大后贝塞尔的小段也变长，判断“小段”要跟着它变。 */
@@ -321,7 +323,9 @@ static void TestCornerLimitCoversWholeCorner(void)
             peak = fmaxf(peak, hypotf(chassis.current.vx, chassis.current.vy));
     }
     assert(chassis_path_result.completed);
-    assert(peak > 90.0f && peak <= 105.0f); // sqrt(2000 / 4 × 20) = 100
+    // 90° 弯、偏差 20 mm：半径 = 20 mm
+    float expected = sqrtf(CHASSIS_ACC_LINEAR * CHASSIS_PATH_CORNER_FACTOR * 20.0f);
+    assert(peak > expected * 0.9f && peak <= expected * 1.05f);
 }
 
 /* cmd_speed 从下一条路径开始生效，正在走的路径保持原限速。 */
@@ -345,18 +349,23 @@ static void TestCommandSpeedAppliesToNextPath(void)
     assert(strstr(Output(), "Move speed 300 mm/s"));
 }
 
+/* 轮速命令：mm/s -> 0.1 RPM，跟着轮径宏走。 */
+static int16_t ExpectRpm10(float mm_per_second)
+{
+    return (int16_t)lroundf(mm_per_second * 600.0f / (3.14159265f * CHASSIS_WHEEL_DIA_MM));
+}
+
 static void TestWheelDiameterScalesKinematics(void)
 {
     Begin();
     chassis_vel forward = {100, 0, 0};
     int16_t rpm_x10[CHASSIS_WHEEL_NUM];
     Chassis_Solve(&forward, rpm_x10);
-    assert(abs(rpm_x10[0]) == 248); // 100 mm/s ÷ (π × 77 mm) × 600
+    assert(abs(rpm_x10[0]) == abs(ExpectRpm10(100.0f))); // 100 mm/s ÷ (π × 轮径) × 600
 
     Line("/set wheel_dia 140");
     Chassis_Solve(&forward, rpm_x10);
-    assert(abs(rpm_x10[0]) == 136);
-
+    assert(abs(rpm_x10[0]) == 136); // 100 mm/s ÷ (π × 140 mm) × 600
     /* 里程计：四轮各转一圈 = π × 140 mm。 */
     float x0 = chassis.pos_x;
     for (int i = 0; i < 4; ++i)
@@ -386,11 +395,12 @@ static void TestChassisKScalesRotation(void)
     chassis_vel turn = {0, 0, 90};
     int16_t rpm_x10[CHASSIS_WHEEL_NUM];
     Chassis_Solve(&turn, rpm_x10);
-    assert(abs(abs(rpm_x10[0]) - 858) <= 1); // 220.2 mm × 90°/s ÷ (π × 77 mm) × 600
+    // 轮沿线速度 = K × 90°/s，再换算成 0.1 RPM
+    assert(abs(rpm_x10[0]) == abs(ExpectRpm10(220.2f * 90.0f * 0.0174532925f)));
 
     Line("/set chassis_k 110.1");
     Chassis_Solve(&turn, rpm_x10);
-    assert(abs(abs(rpm_x10[0]) - 429) <= 1);
+    assert(abs(abs(rpm_x10[0]) - abs(ExpectRpm10(110.1f * 90.0f * 0.0174532925f))) <= 1);
 
 #if !CHASSIS_USE_IMU
     /* 无陀螺仪时航向靠轮子推算：K 减半，同样的轮差算出两倍转角。 */
@@ -400,8 +410,9 @@ static void TestChassisKScalesRotation(void)
     WheelTurn(2, -36.0f);
     WheelTurn(3, 36.0f);
     tick(1);
-    /* 每轮走 π × 77 × 36 / 360 = 24.19 mm，dθ = 24.19 ÷ 110.1 rad = 12.59°。 */
-    AssertNear(chassis.yaw - yaw0, 12.59f, 0.05f);
+    /* 每轮走 π × 轮径 × 36 / 360 mm，转角 = 弧长 ÷ chassis_k(110.1)。 */
+    AssertNear(chassis.yaw - yaw0, 3.14159265f * CHASSIS_WHEEL_DIA_MM * 0.1f / 110.1f * 57.29578f,
+               0.05f);
 #endif
 }
 
@@ -519,7 +530,7 @@ static void TestResetRestoresDefaults(void)
     Line("/set wheel_dia 80");
     Line("/reset");
     AssertNear(chassis_tune.heading_ki, CHASSIS_HEADING_KI, 1e-6f);
-    AssertNear(chassis_tune.wheel_dia, 77.0f, 1e-6f);
+    AssertNear(chassis_tune.wheel_dia, CHASSIS_WHEEL_DIA_MM, 1e-6f);
 }
 
 /* 调试台界面按这些文本格式解析，格式变了界面就读不到，所以逐字固定。 */
@@ -535,9 +546,10 @@ static void TestReplyFormatsForUi(void)
 
     ClearOutput();
     Line("/list wheel_dia");
-    assert(strcmp(Output(),
-                  "wheel_dia       = 77.00  [40.00..150.00] default 77.00 (stopped only)\r\n") ==
-           0);
+    snprintf(want, sizeof(want),
+             "wheel_dia       = %.2f  [40.00..150.00] default %.2f (stopped only)\r\n",
+             (double)CHASSIS_WHEEL_DIA_MM, (double)CHASSIS_WHEEL_DIA_MM);
+    assert(strcmp(Output(), want) == 0);
 
     ClearOutput();
     Line("/set heading_kp 2.5");
@@ -582,19 +594,20 @@ static void TestStatusLineFormatForUi(void)
 static void TestList(void)
 {
     static const char *const names[] = {
-        "heading_kp",  "heading_ki",   "heading_i_max", "heading_i_zone", "turn_max_speed",
-        "distance_kp", "distance_tol", "heading_tol",   "settle_ms",      "acc_linear",
-        "acc_angular", "cmd_speed",    "wheel_dia",     "chassis_k",      "path_deviation",
+        "heading_kp",    "heading_ki",   "heading_i_max",  "heading_i_zone", "turn_max_speed",
+        "heading_brake", "heading_ff_x", "heading_ff_y",   "distance_kp",    "distance_tol",
+        "heading_tol",   "settle_ms",    "acc_linear",     "acc_angular",    "cmd_speed",
+        "wheel_dia",     "chassis_k",    "path_deviation",
     };
     Begin();
     Line("/list");
     for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
         assert(strstr(Output(), names[i]));
 
-    /* 前缀过滤：heading 开头的 5 个，其他都不显示。 */
+    /* 前缀过滤：heading 开头的 8 个，其他都不显示。 */
     ClearOutput();
     Line("/list heading");
-    assert(CountOutput("heading_") == 5U);
+    assert(CountOutput("heading_") == 8U);
     assert(!strstr(Output(), "cmd_speed"));
 
     /* 改过后当前值和默认值都看得到。 */
@@ -796,17 +809,21 @@ static void TestPlotChannels(void)
     chassis.current.vx = 90.0f;
     chassis.current.vy = -45.0f;
     for (int i = 0; i < 4; ++i)
-        chassis.wheel_rpm_meas[i] = 60.0f; // 四轮同速：前进 60 RPM × π × 77 mm ÷ 60 s
+        chassis.wheel_rpm_meas[i] = 60.0f; // 四轮同速：前进 60 RPM × π × 轮径 ÷ 60 s
+    char want[128];
+    float speed = 60.0f * 3.14159265f * CHASSIS_WHEEL_DIA_MM / 60.0f;
+    snprintf(want, sizeof(want), "plot:100.0,-50.0,90.0,-45.0,%.1f,0.0\r\n", (double)speed);
     Wait(10);
-    assert(strstr(Output(), "plot:100.0,-50.0,90.0,-45.0,241.9,0.0\r\n"));
+    assert(strstr(Output(), want));
     /* 横移：实测速度落在 vy。 */
     ClearOutput();
     chassis.wheel_rpm_meas[0] = -60.0f;
     chassis.wheel_rpm_meas[1] = 60.0f;
     chassis.wheel_rpm_meas[2] = 60.0f;
     chassis.wheel_rpm_meas[3] = -60.0f;
+    snprintf(want, sizeof(want), "plot:100.0,-50.0,90.0,-45.0,0.0,%.1f\r\n", (double)speed);
     Wait(10);
-    assert(strstr(Output(), "plot:100.0,-50.0,90.0,-45.0,0.0,241.9\r\n"));
+    assert(strstr(Output(), want));
 
     Line("/plot wheels 100");
     ClearOutput();
