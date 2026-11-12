@@ -62,8 +62,10 @@ static void CarStep(void)
         WheelTurn(i, wheel_rpm[i] * 6.0f * dt);
         v[i] = wheel_rpm[i] * 3.14159265f * CHASSIS_WHEEL_DIA_MM / 60.0f;
     }
-    float vx = 0.25f * (v[0] + v[1] + v[2] + v[3]);
-    float vy = 0.25f * (-v[0] + v[1] + v[2] - v[3]);
+    // 侧移打滑、斜着走：横着实际走的是轮子算出来的 CHASSIS_LATERAL_SCALE 倍，每横移 1 mm 前后偏
+    // CHASSIS_LATERAL_SKEW mm，固件按这两个系数标定过
+    float vy = 0.25f * (-v[0] + v[1] + v[2] - v[3]) * CHASSIS_LATERAL_SCALE;
+    float vx = 0.25f * (v[0] + v[1] + v[2] + v[3]) + CHASSIS_LATERAL_SKEW * vy;
     float wz = (-v[0] + v[1] - v[2] + v[3]) / (4 * CHASSIS_K_MM) * 57.2957795f;
     body_wz = car.tau2 > 0.0f ? body_wz + (wz - body_wz) * (1.0f - expf(-dt / car.tau2)) : wz;
     float slip = car.slip - car.slip_fast * fminf(1.0f, fabsf(body_wz) / 180.0f);
@@ -255,11 +257,13 @@ static void TestAutoSendAfterTurn(void)
     assert(fabsf(log.kp - chassis_tune.heading_kp) < 1e-3f &&
            fabsf(log.ki - chassis_tune.heading_ki) < 1e-3f);
     assert(Count(mark, "LOG param acc_angular=720 heading_tol=0.100 settle_ms=200") == 1U);
-    char third[96]; // 新加的三个航向环参数和编译进去的轮速上限
+    char third[128]; // 新加的三个航向环参数、编译进去的轮速上限、横移系数
     snprintf(third, sizeof(third),
-             "LOG param heading_brake=%.0f heading_ff_x=%.2f heading_ff_y=%.2f max_wheel_rpm=%u\r\n",
+             "LOG param heading_brake=%.0f heading_ff_x=%.2f heading_ff_y=%.2f max_wheel_rpm=%u "
+             "lateral_scale=%.3f lateral_skew=%.4f\r\n",
              (double)CHASSIS_HEADING_BRAKE, (double)CHASSIS_HEADING_FF_X,
-             (double)CHASSIS_HEADING_FF_Y, (unsigned)CHASSIS_MAX_WHEEL_RPM);
+             (double)CHASSIS_HEADING_FF_Y, (unsigned)CHASSIS_MAX_WHEEL_RPM,
+             (double)CHASSIS_LATERAL_SCALE, (double)CHASSIS_LATERAL_SKEW);
     assert(Count(mark, third) == 1U);
 }
 
@@ -377,9 +381,9 @@ static void TestFaultEndsLog(void)
 }
 
 /* ---------- 给 node 测试的日志：调试台自动调参发的那组动作 ---------- */
-/* 平移距离和调试台按指令速度算的默认值一样：1000 mm/s、2000 mm/s² 时 800 mm，中间有一小段匀速。 */
-static const char *const k_sequence[] = {"T5\n",   "T-5\n",  "T20\n",  "T-20\n", "T90\n",
-                                         "T-90\n", "F800\n", "B800\n", "L800\n", "R800\n"};
+/* 平移距离和调试台按指令速度算的默认值一样：1200 mm/s、2000 mm/s² 时 1100 mm，中间有一小段匀速。 */
+static const char *const k_sequence[] = {"T5\n",   "T-5\n",   "T20\n",   "T-20\n",  "T90\n",
+                                         "T-90\n", "F1100\n", "B1100\n", "L1100\n", "R1100\n"};
 
 static void Fixture(FILE *file, fake_car c, float kp, float ki)
 {
@@ -576,6 +580,66 @@ static void TestFeedForward(void)
     Set("heading_ff_y", 0.0f);
 }
 
+/* 跑图的逐段停车，在这辆轮子晚 60 ms 的车上，1200 mm/s：直线中间的点不停；拐角刹车按 path_lag
+   提前，冲过头不超过拐角容差，也不倒回去追航点（倒回去就是车还在滑、轮子已经反转）。
+   path_lag 设 0（原来的刹车曲线）每个点都冲过去 50 mm 以上再倒回来。 */
+typedef struct
+{
+    float time, over, pass_speed, back;
+    uint8_t completed;
+} corner_run;
+
+static corner_run CornerRun(void)
+{
+    float x0 = chassis.pos_x, y0 = chassis.pos_y, h = chassis.yaw;
+    const chassis_waypoint pts[] = {{x0 + 500, y0, h},        {x0 + 1000, y0, h},
+                                    {x0 + 1000, y0 + 800, h}, {x0 + 200, y0 + 800, h},
+                                    {x0 + 200, y0, h},        {x0, y0, h}};
+    const unsigned n = sizeof(pts) / sizeof(pts[0]);
+    Chassis_SetMoveSpeedLimit(1200.0f);
+    assert(Chassis_FollowPath(pts, n, 1U) == HAL_OK);
+    corner_run r = {0};
+    int ticks = 0;
+    for (; chassis.mode == CHASSIS_MODE_PATH && ticks < 6000; ++ticks)
+    {
+        Step(1);
+        unsigned k = Chassis_PathTarget() - 1U; // 正在去的航点
+        if (k >= n)
+            continue;
+        chassis_waypoint a = k ? pts[k - 1U] : (chassis_waypoint){x0, y0, h}, b = pts[k];
+        float ux = b.x - a.x, uy = b.y - a.y, l = hypotf(ux, uy);
+        ux /= l;
+        uy /= l;
+        r.over = fmaxf(r.over, (chassis.pos_x - b.x) * ux + (chassis.pos_y - b.y) * uy);
+        // 沿这段往前的目标车速，负的就是倒回去追航点（航向是 0，车体系就是世界系）
+        r.back = fminf(r.back, chassis.target.vx * ux + chassis.target.vy * uy);
+        if (k == 1U && fabsf(chassis.pos_x - pts[0].x) < 10.0f)
+            r.pass_speed = fmaxf(r.pass_speed, hypotf(body_vx, body_vy));
+    }
+    r.time = (float)ticks * 0.005f;
+    r.completed = chassis_path_result.completed;
+    Idle(60);
+    return r;
+}
+
+static void TestStopEachCornersOnLaggingCar(void)
+{
+    UseCar(k_cars[0]); // 延迟 20 ms + 惯性 40 ms
+    Idle(100);
+    corner_run now = CornerRun();
+    assert(now.completed && now.pass_speed > 1000.0f);
+    assert(now.over <= chassis_tune.path_deviation + 0.5f && now.back > -5.0f);
+    Set("path_lag", 0.0f);
+    corner_run old = CornerRun();
+    assert(old.completed && old.over > 50.0f && old.back < -20.0f);
+    assert(now.time < old.time - 0.5f);
+    Set("path_lag", chassis_tune_default.path_lag);
+    printf("stop at corners, 1200 mm/s, wheels 60 ms late: %.2f s, overshoot %.1f mm "
+           "(braking without the lag: %.2f s, overshoot %.1f mm, backs up at %.0f mm/s)\n",
+           (double)now.time, (double)now.over, (double)old.time, (double)old.over,
+           (double)-old.back);
+}
+
 int main(int argc, char **argv)
 {
     FDCAN_HandleTypeDef can = {0};
@@ -601,6 +665,7 @@ int main(int argc, char **argv)
     TestIntegralClearedWhenMoveStops();
     TestBrakeCurve();
     TestFeedForward();
+    TestStopEachCornersOnLaggingCar();
 
     FILE *file = fopen(argc > 1 ? argv[1] : "build/host/tune_fixture.log", "wb");
     assert(file);

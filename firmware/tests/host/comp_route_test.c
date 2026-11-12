@@ -269,10 +269,11 @@ static void Boot(unsigned obstacle_count, const float (*obstacles)[2])
     lidar_on = lidar_descriptor = 0U;
     lidar_index = lidar_budget = lidar_commands = lidar_stops = 0U;
     memset(ser_reads, 0, sizeof(ser_reads));
-    Agv_Init(AGV_MODE, boot_zone);
+    Agv_Init(AGV_MODE);
     assert(Comp_Init(boot_zone) == HAL_OK);
     Line("/reset");
     Line("/set cmd_speed 400");
+    Line("/set path_lag 0"); // 假车的轮子马上跟上命令，没有驱动滞后
     Line("D0");
     ClearOutput();
 }

@@ -16,7 +16,7 @@
 #include "arm_app.h"
 #endif
 
-#define CONSOLE_ARGS 5U // 最长的命令 /arm point <名字> <q1> <q2>
+#define CONSOLE_ARGS 6U // 最长的命令 /arm point <名字> <q1> <q2> <侧>
 #define STOPPED_ONLY 1U // 运动中一改速度或路径就会跳，只能停车改
 
 typedef struct
@@ -56,6 +56,9 @@ static const Param params[] = {
     CHASSIS_PARAM(wheel_dia, 40.0f, 150.0f, 2U, STOPPED_ONLY),
     CHASSIS_PARAM(chassis_k, 100.0f, 400.0f, 2U, STOPPED_ONLY),
     CHASSIS_PARAM(path_deviation, 0.5f, 50.0f, 2U, STOPPED_ONLY),
+    CHASSIS_PARAM(lateral_scale, 0.8f, 1.2f, 3U, STOPPED_ONLY),
+    CHASSIS_PARAM(lateral_skew, -0.1f, 0.1f, 4U, STOPPED_ONLY),
+    CHASSIS_PARAM(path_lag, 0.0f, 200.0f, 0U, 0U),
 #if AGV_MODE == AGV_MODE_COMPETITION
     LIDAR_PARAM(lidar_x, -200.0f, 200.0f, 1U),
     LIDAR_PARAM(lidar_y, -200.0f, 200.0f, 1U),
@@ -75,9 +78,9 @@ static const Param params[] = {
     ARM_PARAM(j2_x, -300.0f, 300.0f, 1U),
     ARM_PARAM(j2_y, -300.0f, 300.0f, 1U),
     ARM_PARAM(a1, 20.0f, 500.0f, 1U),
-    ARM_PARAM(b1, 20.0f, 500.0f, 1U),
+    ARM_PARAM(b1, 20.0f, 500.0f, 2U), // 两位小数：死点标定算出来的，差 0.1 mm 过死点就能觉出来
     ARM_PARAM(a2, 20.0f, 500.0f, 1U),
-    ARM_PARAM(b2, 20.0f, 500.0f, 1U),
+    ARM_PARAM(b2, 20.0f, 500.0f, 2U),
     ARM_PARAM(mode, 0.0f, 1.0f, 0U),
     ARM_PARAM(margin, 0.0f, 45.0f, 1U),
     ARM_PARAM(zero1, -180.0f, 180.0f, 2U),
@@ -90,6 +93,9 @@ static const Param params[] = {
     ARM_PARAM(q2_max, -180.0f, 180.0f, 1U),
     ARM_PARAM(speed, 5.0f, 720.0f, 0U),
     ARM_PARAM(acc, 10.0f, 5000.0f, 0U),
+    ARM_PARAM(smooth, 0.0f, 200.0f, 0U),
+    ARM_PARAM(swing_speed, 50.0f, 2000.0f, 0U),
+    ARM_PARAM(swing_run, 20.0f, 200.0f, 0U),
     ARM_PARAM(cam, 0.0f, 2.0f, 0U),
     ARM_PARAM(cam_rot, -180.0f, 180.0f, 1U),
     ARM_PARAM(cam_x, -500.0f, 500.0f, 1U),
@@ -148,7 +154,7 @@ static void CmdHelp(void)
                           "  /start  /run  /task [<code>|clear]  /vision <mode 0..3> [color 0..6]\r\n"
                           "  /obs  /scan  /pose <x> <y> <heading>  /route [<x> <y>|go]\r\n"
 #elif AGV_MODE == AGV_MODE_SURVEY
-                          "  /route\r\n"
+                          "  /start <1|2>  survey from start zone 1 or 2  /route\r\n"
 #elif AGV_MODE == AGV_MODE_ARM
                           "  /arm  /arm hold|free  /arm j <q1> <q2>  /arm xy <x> <y>\r\n"
                           "  /arm jog <j1|j2|x|y> <step>  /arm zero [<q1> <q2>]  /arm camdir\r\n"
@@ -267,6 +273,28 @@ static void CmdLog(const char *arg)
         ChassisTelemetry_Printf("ERR  usage: /log [on|off]\r\n");
 }
 
+#if AGV_MODE == AGV_MODE_SURVEY
+/* /start <出发区>：出发区必须给，选错了车会照着另一个出发区的路线撞出去。 */
+static void CmdSurveyStart(const char *zone_text)
+{
+    float zone = 0.0f;
+    if (!zone_text || !ParseWhole(zone_text, &zone) || (zone != 1.0f && zone != 2.0f))
+    {
+        ChassisTelemetry_Printf("ERR  usage: /start <1|2> (the start zone the robot is in)\r\n");
+        return;
+    }
+    HAL_StatusTypeDef status = Agv_Start((unsigned)zone);
+    if (status == HAL_OK)
+        ChassisTelemetry_Printf("OK   survey from zone %u\r\n", (unsigned)zone);
+    else if (status == HAL_BUSY)
+        ChassisTelemetry_Printf("BUSY %s\r\n", agv.state >= AGV_WAIT && agv.state <= AGV_DOCK_IN
+                                                   ? "survey running, S stops it"
+                                                   : "chassis not ready or moving");
+    else
+        ChassisTelemetry_Printf("ERR  survey start rejected\r\n");
+}
+#endif
+
 #if AGV_MODE == AGV_MODE_ARM
 static void ArmBusy(void)
 {
@@ -297,21 +325,62 @@ static void ArmMoved(arm_result result)
     else if (result == ARM_PATH)
         ChassisTelemetry_Printf("ERR  arm: the way there passes a dead point, go through another "
                                 "point first\r\n");
+    else if (result == ARM_SIDE)
+        ChassisTelemetry_Printf("ERR  arm: only reachable from the other side of the dead point, "
+                                "/arm swing first\r\n");
     else
         ChassisTelemetry_Printf("OK   arm to q=%s,%s\r\n", ChassisTelemetry_Num(arm.goal[0], 2),
                                 ChassisTelemetry_Num(arm.goal[1], 2));
 }
 
+/* 过死点的回复：单独过（then = NULL），或者去另一侧的一组关节角时先过。 */
+static void ArmSwung(arm_result result, const float *then)
+{
+    if (result == ARM_BUSY)
+        ArmBusy();
+    else if (result == ARM_LIMIT)
+        ChassisTelemetry_Printf("ERR  arm: the swing or the point is outside the joint limits\r\n");
+    else if (result == ARM_REACH)
+        ChassisTelemetry_Printf("ERR  arm: no dead point to swing through from here (check the "
+                                "sizes, the limits and arm_swing_run)\r\n");
+    else if (result == ARM_PATH)
+        ChassisTelemetry_Printf("ERR  arm: a dead point is in the way to the swing start or from "
+                                "its end to the point\r\n");
+    else if (then != NULL)
+        ChassisTelemetry_Printf("OK   arm swing, then to q=%s,%s\r\n",
+                                ChassisTelemetry_Num(then[0], 2), ChassisTelemetry_Num(then[1], 2));
+    else
+        ChassisTelemetry_Printf("OK   arm swing\r\n");
+}
+
+/* 走到一组关节角，side 是记它时末端在的那一侧：不在这一侧就先过死点。 */
+static void ArmGo(float q1, float q2, uint8_t side)
+{
+    const float q[2] = {q1, q2};
+    if (side == arm.side)
+        ArmMoved(Arm_MoveJoints(q1, q2));
+    else
+        ArmSwung(Arm_MoveJointsSide(q1, q2, side), q);
+}
+
+static uint8_t ParseSide(const char *text, uint8_t *side)
+{
+    if ((text[0] != '0' && text[0] != '1') || text[1] != '\0')
+        return 0U;
+    *side = (uint8_t)(text[0] - '0');
+    return 1U;
+}
+
 static void ArmPoint(const arm_point *p)
 {
-    ChassisTelemetry_Printf("ARM point %s %s %s\r\n", p->name, ChassisTelemetry_Num(p->q[0], 2),
-                            ChassisTelemetry_Num(p->q[1], 2));
+    ChassisTelemetry_Printf("ARM point %s %s %s %u\r\n", p->name, ChassisTelemetry_Num(p->q[0], 2),
+                            ChassisTelemetry_Num(p->q[1], 2), (unsigned)p->side);
 }
 
 /* 存点位：名字不对和超限位都是 ERROR，分开说。 */
-static void ArmSavePoint(const char *name, float q1, float q2)
+static void ArmSavePoint(const char *name, float q1, float q2, uint8_t side)
 {
-    HAL_StatusTypeDef result = Arm_SetPoint(name, q1, q2);
+    HAL_StatusTypeDef result = Arm_SetPoint(name, q1, q2, side);
     if (result == HAL_OK)
         ArmPoint(Arm_FindPoint(name));
     else if (result == HAL_BUSY)
@@ -329,6 +398,7 @@ static void CmdArm(unsigned argc, char *argv[])
 {
     const char *sub = argc >= 2U ? argv[1] : "";
     float a = 0.0f, b = 0.0f;
+    uint8_t side = arm.side;
     uint8_t pair = argc == 4U && ParseNumber(argv[2], &a) && ParseNumber(argv[3], &b);
     if (argc == 1U)
         ArmApp_PrintStatus();
@@ -342,8 +412,35 @@ static void CmdArm(unsigned argc, char *argv[])
     }
     else if (strcmp(sub, "j") == 0 && pair)
         ArmMoved(Arm_MoveJoints(a, b));
+    else if (strcmp(sub, "j") == 0 && argc == 5U && ParseNumber(argv[2], &a) &&
+             ParseNumber(argv[3], &b) && ParseSide(argv[4], &side))
+        ArmGo(a, b, side);
     else if (strcmp(sub, "xy") == 0 && pair)
         ArmMoved(Arm_MoveTo(a, b));
+    else if (strcmp(sub, "swing") == 0 && argc == 2U)
+        ArmSwung(Arm_Swing(), NULL);
+    else if (strcmp(sub, "side") == 0 && argc == 3U && ParseSide(argv[2], &side))
+    {
+        if (Arm_SetSide(side) != HAL_OK)
+            ArmBusy();
+        else
+            ChassisTelemetry_Printf("OK   arm side %u\r\n", (unsigned)side);
+    }
+    else if (strcmp(sub, "deadpoint") == 0 && argc == 2U)
+    {
+        float forearm[2];
+        HAL_StatusTypeDef result = Arm_DeadPoint(forearm);
+        if (result == HAL_BUSY)
+            ArmBusy();
+        else if (result != HAL_OK)
+            ChassisTelemetry_Printf("ERR  arm: the forearms are not in one line (the elbows are "
+                                    "not about arm_b1 + arm_b2 apart)\r\n");
+        else
+        {
+            CmdSet("arm_b1", ChassisTelemetry_Num(forearm[0], 2));
+            CmdSet("arm_b2", ChassisTelemetry_Num(forearm[1], 2));
+        }
+    }
     else if (strcmp(sub, "jog") == 0 && argc == 4U && ParseNumber(argv[3], &b) &&
              (strcmp(argv[2], "j1") == 0 || strcmp(argv[2], "j2") == 0 ||
               strcmp(argv[2], "x") == 0 || strcmp(argv[2], "y") == 0))
@@ -399,15 +496,15 @@ static void CmdArm(unsigned argc, char *argv[])
             ArmPoint(Arm_PointAt(i));
         ChassisTelemetry_Printf("ARM points %u\r\n", Arm_PointCount());
     }
-    else if (strcmp(sub, "point") == 0 && argc == 5U && ParseNumber(argv[3], &a) &&
-             ParseNumber(argv[4], &b))
-        ArmSavePoint(argv[2], a, b);
+    else if (strcmp(sub, "point") == 0 && (argc == 5U || argc == 6U) && ParseNumber(argv[3], &a) &&
+             ParseNumber(argv[4], &b) && (argc == 5U || ParseSide(argv[5], &side)))
+        ArmSavePoint(argv[2], a, b, side); // 不写侧就是现在这一侧
     else if (strcmp(sub, "save") == 0 && argc == 3U)
     {
         if ((arm.state != ARM_READY && arm.state != ARM_FREE) || arm.moving)
             ArmBusy();
         else
-            ArmSavePoint(argv[2], arm.q[0], arm.q[1]);
+            ArmSavePoint(argv[2], arm.q[0], arm.q[1], arm.side);
     }
     else if ((strcmp(sub, "go") == 0 || strcmp(sub, "del") == 0) && argc == 3U)
     {
@@ -415,7 +512,7 @@ static void CmdArm(unsigned argc, char *argv[])
         if (p == NULL)
             ChassisTelemetry_Printf("ERR  arm: no point '%s' (/arm points)\r\n", argv[2]);
         else if (sub[0] == 'g')
-            ArmMoved(Arm_MoveJoints(p->q[0], p->q[1]));
+            ArmGo(p->q[0], p->q[1], p->side);
         else
         {
             (void)Arm_DeletePoint(argv[2]);
@@ -423,10 +520,12 @@ static void CmdArm(unsigned argc, char *argv[])
         }
     }
     else
-        ChassisTelemetry_Printf("ERR  usage: /arm [hold|free|points|camdir], /arm j|xy <a> <b>, "
-                                "/arm jog j1|j2|x|y <step>, /arm zero [<q1> <q2>], "
-                                "/arm save|go|del <name>, /arm point <name> <q1> <q2>, "
-                                "/arm follow <color|off>\r\n");
+        ChassisTelemetry_Printf(
+            "ERR  usage: /arm [hold|free|points|camdir|swing|deadpoint], "
+            "/arm j <q1> <q2> [side], /arm xy <x> <y>, "
+            "/arm jog j1|j2|x|y <step>, /arm zero [<q1> <q2>], /arm side <0|1>, "
+            "/arm save|go|del <name>, /arm point <name> <q1> <q2> [side], "
+            "/arm follow <color|off>\r\n");
 }
 #endif
 
@@ -604,6 +703,8 @@ void Console_Line(char *line)
     else if (strcmp(cmd, "route") == 0 && argc <= 3U)
         CmdRoute(argc >= 2U ? argv[1] : NULL, argc == 3U ? argv[2] : NULL);
 #elif AGV_MODE == AGV_MODE_SURVEY
+    else if (strcmp(cmd, "start") == 0 && argc <= 2U)
+        CmdSurveyStart(argc == 2U ? argv[1] : NULL);
     else if (strcmp(cmd, "route") == 0 && argc == 1U)
         Agv_RouteReport();
 #elif AGV_MODE == AGV_MODE_ARM

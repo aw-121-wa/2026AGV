@@ -184,18 +184,45 @@ static void TestHeadingTolDefinesSettled(void)
     assert(chassis.mode == CHASSIS_MODE_VEL);
 }
 
-/* 路径刹车曲线：逐段停车时到航点要减到 0，v = sqrt(2 × a × d)；
-   后面还有 300 mm 总路程时单看总路程是 245 mm/s，要看到当前航点的 141 mm/s 才对。 */
+/* 路径刹车曲线（path_lag 设 0，只看加速度）：逐段停车时到拐角要减到 0，v = sqrt(2 × a × d)；
+   后面还有 300 mm 总路程时单看总路程是 245 mm/s，要看到当前航点的 141 mm/s 才对。
+   直线上的中间点（共线、航向不变）逐段停车也不停：只看总路程，245 mm/s。 */
 static void TestPathBrakesToWaypointWithTunedAcceleration(void)
 {
     Begin();
     Line("/set acc_linear 100");
+    Line("/set path_lag 0");
     Chassis_SetMoveSpeedLimit(400.0f);
     float x = chassis.pos_x, y = chassis.pos_y, h = chassis.yaw;
-    chassis_waypoint points[2] = {{x + 100, y, h}, {x + 300, y, h}};
-    assert(Chassis_FollowPath(points, 2, 1) == HAL_OK);
+    chassis_waypoint corner[2] = {{x + 100, y, h}, {x + 100, y + 200, h}};
+    assert(Chassis_FollowPath(corner, 2, 1) == HAL_OK);
     tick(1);
     AssertNear(PathSpeed(), 141.4f, 1.0f);
+
+    Begin();
+    Line("/set acc_linear 100");
+    Line("/set path_lag 0");
+    Chassis_SetMoveSpeedLimit(400.0f);
+    x = chassis.pos_x, y = chassis.pos_y, h = chassis.yaw;
+    chassis_waypoint straight[2] = {{x + 100, y, h}, {x + 300, y, h}};
+    assert(Chassis_FollowPath(straight, 2, 1) == HAL_OK);
+    tick(1);
+    AssertNear(PathSpeed(), 244.9f, 1.0f);
+}
+
+/* 刹车提前量 path_lag：轮子晚 lag 才跟上命令，v·lag + v² / (2a) = d，
+   v = sqrt((a·lag)² + 2·a·d) − a·lag。a = 100、lag = 60 ms、d = 100：135.5 mm/s。 */
+static void TestPathLagBrakesEarlier(void)
+{
+    Begin();
+    Line("/set acc_linear 100");
+    Line("/set path_lag 60");
+    Chassis_SetMoveSpeedLimit(400.0f);
+    float x = chassis.pos_x, y = chassis.pos_y, h = chassis.yaw;
+    chassis_waypoint corner[2] = {{x + 100, y, h}, {x + 100, y + 200, h}};
+    assert(Chassis_FollowPath(corner, 2, 1) == HAL_OK);
+    tick(1);
+    AssertNear(PathSpeed(), sqrtf(6.0f * 6.0f + 2.0f * 100.0f * 100.0f) - 6.0f, 1.0f);
 }
 
 /* 向前看的刹车：中间航点共线（航向不同所以不合并）不减速，但 200 mm 外要停，
@@ -204,6 +231,7 @@ static void TestPathLooksAheadWithTunedAcceleration(void)
 {
     Begin();
     Line("/set acc_linear 100");
+    Line("/set path_lag 0");
     Chassis_SetMoveSpeedLimit(400.0f);
     float x = chassis.pos_x, y = chassis.pos_y, h = chassis.yaw;
     chassis_waypoint points[2] = {{x + 100, y, h}, {x + 200, y, h + 10.0f}};
@@ -230,9 +258,11 @@ static void TestCornerExitSpeedFollowsParameters(void)
 {
     Begin();
     Line("/set acc_linear 100");
+    Line("/set path_lag 0");
     AssertNear(SpeedOneMillimetreBeforeSharpCorner(), 15.04f, 0.1f); // sqrt(26.2 + 200)
     Begin();
     Line("/set acc_linear 100");
+    Line("/set path_lag 0");
     Line("/set path_deviation 20");
     AssertNear(SpeedOneMillimetreBeforeSharpCorner(), 17.46f, 0.1f); // sqrt(104.9 + 200)
 }
@@ -372,6 +402,50 @@ static void TestWheelDiameterScalesKinematics(void)
         WheelTurn(i, 360.0f);
     tick(1);
     AssertNear(chassis.pos_x - x0, 439.8f, 0.5f);
+}
+
+/* 横移系数：麦轮侧移打滑，同样的轮子转数横着走得少。要横移 v，轮子按 v / 系数 转；里程计把轮子算出
+   来的横移乘系数。L2400 实走 2324 mm 时标 0.968：命令 100 mm/s 横移，轮速是前进 100 mm/s 的
+   1/0.968 倍；四轮按横移方向各转一圈，里程计记 π × 轮径 × 0.968。
+   横移带前后：每往左 1 mm 往前偏 k mm。命令纯横移时轮子先带上 -k × vy 的前后分量，里程计前后位移
+   加 k × 横移，两个一抵，命令什么走什么。 */
+static void TestLateralScale(void)
+{
+    Begin();
+    Line("/set lateral_scale 0.9");
+    Line("/set lateral_skew 0");
+    AssertNear(chassis_tune.lateral_scale, 0.9f, 1e-6f);
+    chassis_vel forward = {100, 0, 0}, left = {0, 100, 0};
+    int16_t ahead[CHASSIS_WHEEL_NUM], side[CHASSIS_WHEEL_NUM];
+    Chassis_Solve(&forward, ahead);
+    Chassis_Solve(&left, side);
+    for (int i = 0; i < CHASSIS_WHEEL_NUM; ++i)
+        assert(abs(abs(side[i]) - (int)lroundf(abs(ahead[i]) / 0.9f)) <= 1);
+    float y0 = chassis.pos_y;
+    const float sign[CHASSIS_WHEEL_NUM] = {-1.0f, 1.0f, 1.0f, -1.0f}; // 向左平移时各轮的转向
+    for (int i = 0; i < 4; ++i)
+        WheelTurn(i, sign[i] * 360.0f);
+    tick(1);
+    AssertNear(chassis.pos_y - y0, 3.14159265f * CHASSIS_WHEEL_DIA_MM * 0.9f, 0.5f);
+
+    Line("/set lateral_skew 0.05");
+    AssertNear(chassis_tune.lateral_skew, 0.05f, 1e-6f);
+    Chassis_Solve(&left, side);
+    /* 四轮的前后分量（正解的 vx）就是要补的 -0.05 × 100 mm/s。 */
+    float ahead_mm = 0.25f * (side[0] + side[1] + side[2] + side[3]) * 0.1f * 3.14159265f *
+                     CHASSIS_WHEEL_DIA_MM / 60.0f;
+    AssertNear(ahead_mm, -5.0f, 0.3f);
+    float x0 = chassis.pos_x;
+    y0 = chassis.pos_y;
+    for (int i = 0; i < 4; ++i)
+        WheelTurn(i, sign[i] * 360.0f);
+    tick(1);
+    float lateral = 3.14159265f * CHASSIS_WHEEL_DIA_MM * 0.9f;
+    AssertNear(chassis.pos_y - y0, lateral, 0.5f);
+    AssertNear(chassis.pos_x - x0, 0.05f * lateral, 0.2f);
+    Line("/reset");
+    AssertNear(chassis_tune.lateral_scale, CHASSIS_LATERAL_SCALE, 1e-6f);
+    AssertNear(chassis_tune.lateral_skew, CHASSIS_LATERAL_SKEW, 1e-6f);
 }
 
 /* 路径控制用轮速预测当前位置，预测也要跟着轮径变：60 RPM × 40 ms 在 140 mm 轮径下走 17.6 mm，
@@ -815,13 +889,16 @@ static void TestPlotChannels(void)
     snprintf(want, sizeof(want), "plot:100.0,-50.0,90.0,-45.0,%.1f,0.0\r\n", (double)speed);
     Wait(10);
     assert(strstr(Output(), want));
-    /* 横移：实测速度落在 vy。 */
+    /* 横移：实测速度落在 vy，乘横移系数（麦轮侧移打滑，同样的轮速横着走得少），vx
+     * 是横移带出来的前后。 */
     ClearOutput();
     chassis.wheel_rpm_meas[0] = -60.0f;
     chassis.wheel_rpm_meas[1] = 60.0f;
     chassis.wheel_rpm_meas[2] = 60.0f;
     chassis.wheel_rpm_meas[3] = -60.0f;
-    snprintf(want, sizeof(want), "plot:100.0,-50.0,90.0,-45.0,0.0,%.1f\r\n", (double)speed);
+    float side = speed * CHASSIS_LATERAL_SCALE;
+    snprintf(want, sizeof(want), "plot:100.0,-50.0,90.0,-45.0,%.1f,%.1f\r\n",
+             (double)(CHASSIS_LATERAL_SKEW * side), (double)side);
     Wait(10);
     assert(strstr(Output(), want));
 
@@ -920,6 +997,7 @@ int main(void)
     TestDistanceTolDefinesStationary();
     TestHeadingTolDefinesSettled();
     TestPathBrakesToWaypointWithTunedAcceleration();
+    TestPathLagBrakesEarlier();
     TestPathLooksAheadWithTunedAcceleration();
     TestCornerExitSpeedFollowsParameters();
     TestDistanceTolDefinesPathFinish();
@@ -929,6 +1007,7 @@ int main(void)
     TestCornerLimitCoversWholeCorner();
     TestCommandSpeedAppliesToNextPath();
     TestWheelDiameterScalesKinematics();
+    TestLateralScale();
     TestWheelDiameterScalesPathPrediction();
     TestChassisKScalesRotation();
     TestStoppedOnlyParametersRefusedWhileMoving();

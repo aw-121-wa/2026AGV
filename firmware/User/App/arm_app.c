@@ -18,6 +18,7 @@ static const char *const color_names[] = {"any",   "red",   "yellow",   "blue",
                                           "green", "black", "lightblue"};
 
 static uint8_t shown_state = 0xFFU, shown_detail, shown_follow, shown_seen, shown_reach;
+static uint8_t shown_side = 0xFFU;
 static uint8_t vision_online, mode_color = 0xFFU;
 static uint32_t shown_moves, material_ms, mode_ms;
 
@@ -103,10 +104,11 @@ static const char *StateTail(void)
 void ArmApp_PrintStatus(void)
 {
     const char *(*num)(float, unsigned) = ChassisTelemetry_Num;
-    ChassisTelemetry_Printf("          ARM %s q=%s,%s xy=%s,%s goal=%s,%s move=%u follow=%s%s\r\n",
-                            state_names[arm.state], num(arm.q[0], 2), num(arm.q[1], 2),
-                            num(arm.x, 1), num(arm.y, 1), num(arm.goal[0], 2), num(arm.goal[1], 2),
-                            (unsigned)arm.moving, FollowText(), StateTail());
+    ChassisTelemetry_Printf(
+        "          ARM %s q=%s,%s xy=%s,%s goal=%s,%s move=%u side=%u follow=%s%s\r\n",
+        state_names[arm.state], num(arm.q[0], 2), num(arm.q[1], 2), num(arm.x, 1), num(arm.y, 1),
+        num(arm.goal[0], 2), num(arm.goal[1], 2), (unsigned)arm.moving, (unsigned)arm.side,
+        FollowText(), StateTail());
     unsigned count =
         vision.material_ms && HAL_GetTick() - vision.material_ms <= ARM_MATERIAL_FRESH_MS
             ? vision.material_count
@@ -130,6 +132,11 @@ static void PrintEvents(void)
         shown_state = arm.state;
         shown_detail = arm.detail;
         ChassisTelemetry_Printf("ARM state %s%s\r\n", state_names[arm.state], StateTail());
+    }
+    if (arm.side != shown_side) // 过死点那一拍就打，调试台的俯视图马上换边
+    {
+        shown_side = arm.side;
+        ChassisTelemetry_Printf("ARM side %u\r\n", (unsigned)arm.side);
     }
     if (arm.moves != shown_moves)
     {

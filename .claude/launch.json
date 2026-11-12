@@ -4,7 +4,7 @@
     {
       "name": "console",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "C:/Users/lovec/AppData/Local/Temp/claude/313728fa2bb0fad0/77ffa7ad-9b6d-4696-b2e5-2d171fbc8e84/scratchpad/site"],
+      "runtimeArgs": ["tools/agv_server.py", "--port", "8765", "--no-browser"],
       "port": 8765
     }
   ]

@@ -520,6 +520,11 @@ static void Setup(void)
     arm_tune.a1 = arm_tune.a2 = 100.0f;
     arm_tune.b1 = arm_tune.b2 = 150.0f;
     arm_tune.mode = 0.0f;
+    arm_tune.speed = 90.0f; // 速度、平滑、过死点也用固定的，arm_calib.h 调了不用跟着改
+    arm_tune.acc = 360.0f;
+    arm_tune.smooth = 0.0f;
+    arm_tune.swing_speed = 300.0f;
+    arm_tune.swing_run = 100.0f;
     arm_tune.cam_x = 0.0f;
     arm_tune.cam_y = 190.0f;
     arm_tune.zero1 = 34.5f;  // 1234.5 - 3 × 360 - 120
@@ -539,21 +544,40 @@ static void Ready(void)
     RUN_UNTIL(arm.state == ARM_READY && !need_sync, 100U);
 }
 
-/* arm_calib.h 的默认尺寸按设计俯视图：图上那个姿态 (90, 90) 末端在中线右边 75 mm，离死点够远。 */
+/* arm_calib.h 的默认尺寸（电机间距 200 实物，大臂 140、小臂 235 按设计俯视图）：图上那个姿态
+   (90, 90) 末端在两个肘连线靠车右的一侧（side 1）、中线右边 73 mm，离死点够远。 */
 static void TestDrawingDefaults(void)
 {
     float x, y;
     arm_tune = arm_tune_default;
-    assert(Arm_Forward(90.0f, 90.0f, &x, &y));
+    arm.side = 1U;
+    assert(arm_tune.mode == 1.0f && Arm_Forward(90.0f, 90.0f, &x, &y));
     Near(x, 0.0f, 0.05f);
-    Near(y, -74.94f, 0.05f);
+    Near(y, -72.66f, 0.05f);
     assert(Arm_Clearance(90.0f, 90.0f) > 20.0f);
-    /* 两个工作区：从图上的姿态直着摆到中线另一边的料盘（肘拉直了转过去），也能伸到车外，
-       路上两根小臂都不成一条线。 */
+    /* 这一侧：两根大臂一起顺时针摆过去（谁也不越过谁），够得着车右外面和车头前面。车左的料盘在
+       另一侧，要过死点，见 TestSwingFromPowerOnPose。 */
     float q[2];
     arm.sp[0] = arm.sp[1] = 90.0f;
-    assert(Solve(-95.0f, 140.0f, q) == ARM_OK && Solve(95.0f, 140.0f, q) == ARM_OK);
     assert(Solve(0.0f, -280.0f, q) == ARM_OK && Solve(250.0f, 0.0f, q) == ARM_OK);
+    arm.side = 0U;
+}
+
+/* 初始位置：上电前臂摆成图上那个姿态，驱动器的位置读数从 0 开始。按 arm_calib.h 的默认零点，固件
+   一上电认的就是 (90, 90)、末端在中线右边 73 mm，锁在原地不动。 */
+static void TestPowerOnPose(void)
+{
+    Setup();
+    arm_tune = arm_tune_default;
+    sim[5].pos = sim[6].pos = 0.0f;
+    RUN_UNTIL(arm.state == ARM_READY && !need_sync, 100U);
+    Near(arm.q[0], 90.0f, 0.01f);
+    Near(arm.q[1], 90.0f, 0.01f);
+    Near(arm.x, 0.0f, 0.05f);
+    Near(arm.y, -72.66f, 0.05f);
+    RUN_UNTIL(sim[5].fb && sim[6].fb, 10U);
+    Near(sim[5].target, 0.0f, 0.05f);
+    Near(sim[6].target, 0.0f, 0.05f);
 }
 
 /* 五连杆的几何：正解、逆解互相对得上；装配方式只认一种；死点附近不给。 */
@@ -567,10 +591,10 @@ static void TestKinematics(void)
     Arm_Elbows(120.0f, 60.0f, e);
     Near(e[0], -110.0f, 0.01f);
     Near(e[3], 86.60f, 0.01f);
-    arm_tune.mode = 1.0f; // 另一种装配方式：末端在两个肘连线的另一边
+    arm.side = 1U; // 末端在两个肘连线的另一侧
     assert(Arm_Forward(120.0f, 60.0f, &x, &y));
     Near(y, 86.60f - 101.98f, 0.02f);
-    arm_tune.mode = 0.0f;
+    arm.side = 0U;
     /* 两根小臂拉成一条线（两个肘正好隔 300 mm）：合不拢。 */
     assert(!Arm_Forward(154.158f, 25.842f, &x, &y) || Arm_Clearance(154.158f, 25.842f) < 1.0f);
     assert(Arm_Clearance(120.0f, 60.0f) > 70.0f);
@@ -814,23 +838,347 @@ static void TestCalibrationChangesDoNotMove(void)
 static void TestPoints(void)
 {
     Ready();
-    assert(Arm_SetPoint("home", 120.0f, 60.0f) == HAL_OK);
-    assert(Arm_SetPoint("home", 130.0f, 70.0f) == HAL_OK && Arm_PointCount() == 1U); // 覆盖
-    assert(Arm_FindPoint("home")->q[0] == 130.0f);
-    assert(Arm_SetPoint("9lives", 0.0f, 0.0f) == HAL_ERROR);
-    assert(Arm_SetPoint("bad-name", 0.0f, 0.0f) == HAL_ERROR);
-    assert(Arm_SetPoint("toolongname1", 0.0f, 0.0f) == HAL_ERROR);
-    assert(Arm_SetPoint("far", 0.0f, 175.0f) == HAL_ERROR);
+    assert(Arm_SetPoint("home", 120.0f, 60.0f, 0U) == HAL_OK);
+    assert(Arm_SetPoint("home", 130.0f, 70.0f, 1U) == HAL_OK && Arm_PointCount() == 1U); // 覆盖
+    assert(Arm_FindPoint("home")->q[0] == 130.0f && Arm_FindPoint("home")->side == 1U);
+    assert(Arm_SetPoint("9lives", 0.0f, 0.0f, 0U) == HAL_ERROR);
+    assert(Arm_SetPoint("bad-name", 0.0f, 0.0f, 0U) == HAL_ERROR);
+    assert(Arm_SetPoint("toolongname1", 0.0f, 0.0f, 0U) == HAL_ERROR);
+    assert(Arm_SetPoint("far", 0.0f, 175.0f, 0U) == HAL_ERROR);
     char name[12];
     for (unsigned i = 1; i < ARM_POINTS; ++i)
     {
         snprintf(name, sizeof(name), "p%u", i);
-        assert(Arm_SetPoint(name, (float)i, 0.0f) == HAL_OK);
+        assert(Arm_SetPoint(name, (float)i, 0.0f, 0U) == HAL_OK);
     }
-    assert(Arm_SetPoint("onemore", 0.0f, 0.0f) == HAL_BUSY);
+    assert(Arm_SetPoint("onemore", 0.0f, 0.0f, 0U) == HAL_BUSY);
     assert(Arm_DeletePoint("p3") == HAL_OK && Arm_PointCount() == ARM_POINTS - 1U);
     assert(Arm_FindPoint("p3") == NULL && Arm_FindPoint("p4")->q[0] == 4.0f);
     assert(Arm_DeletePoint("p3") == HAL_ERROR);
+}
+
+/* 平滑：发给电机的位置是规划位置最近 arm_smooth 毫秒的平均。梯形速度的加速度是一拍跳上去的，
+   平均以后分 8 拍爬上去；两个关节还在同一条直线上，不冲过目标，最后正好停在目标上，发出去的
+   位置追上了才算走完。 */
+static void TestSmoothing(void)
+{
+    Ready();
+    arm_tune.smooth = 40.0f; // 8 拍
+    const float start[2] = {arm.sp[0], arm.sp[1]}, goal[2] = {150.0f, 70.0f};
+    float was[2][2] = {{out[0], out[1]}, {arm.sp[0], arm.sp[1]}}; // 发出去的、规划的
+    float v_was[2][2] = {{0}}, a_was[2][2] = {{0}}, jerk[2] = {0.0f, 0.0f}, vpeak = 0.0f,
+          apeak = 0.0f;
+    float off = 0.0f;
+    unsigned ticks = 0U, planned = 0U;
+    ClearPrinted();
+    assert(Arm_MoveJoints(goal[0], goal[1]) == ARM_OK);
+    while (arm.moving)
+    {
+        Tick();
+        assert(++ticks < 2000U);
+        if (!planned && arm.sp[0] == goal[0] && arm.sp[1] == goal[1])
+            planned = ticks;
+        const float now[2][2] = {{out[0], out[1]}, {arm.sp[0], arm.sp[1]}};
+        for (unsigned k = 0; k < 2U; ++k) // 只看走得远的 J1：它用满速度和加速度
+        {
+            float v = (now[k][0] - was[k][0]) / 0.005f, a = (v - v_was[k][0]) / 0.005f;
+            jerk[k] = fmaxf(jerk[k], fabsf(a - a_was[k][0]));
+            if (k == 0U)
+            {
+                vpeak = fmaxf(vpeak, fabsf(v));
+                apeak = fmaxf(apeak, fabsf(a));
+            }
+            was[k][0] = now[k][0];
+            v_was[k][0] = v;
+            a_was[k][0] = a;
+        }
+        float s0 = (out[0] - start[0]) / (goal[0] - start[0]);
+        float s1 = (out[1] - start[1]) / (goal[1] - start[1]);
+        off = fmaxf(off, fabsf(s0 - s1));
+        assert(s0 <= 1.00001f && s1 <= 1.00001f);
+    }
+    printf("smoothing 40 ms: done %u ticks after the plan, peak %.1f deg/s %.0f deg/s^2, "
+           "acceleration steps %.0f -> %.0f deg/s^2 per tick, off-line %.5f\n",
+           ticks - planned, (double)vpeak, (double)apeak, (double)jerk[1], (double)jerk[0],
+           (double)off);
+    assert(out[0] == goal[0] && out[1] == goal[1] && planned);
+    assert(ticks >= planned + 4U && ticks <= planned + 7U); // 窗口里全是目标了才算走完
+    /* 加速度是位置的两次差分，单精度下有几 °/s² 的噪声。 */
+    assert(off < 1e-3f && vpeak <= 90.0f * 1.001f && apeak <= 360.0f * 1.03f);
+    assert(jerk[0] < 0.3f * jerk[1]); // 加速度一拍的跳变小了一大截
+    Run(40);
+    assert(Count("ARM done ") == 1U);
+    Near(arm.q[0], goal[0], 0.06f);
+    Near(arm.q[1], goal[1], 0.06f);
+    /* 停着改窗口：不动。 */
+    float held[2] = {sim[5].pos, sim[6].pos};
+    arm_tune.smooth = 100.0f;
+    Run(40);
+    arm_tune.smooth = 0.0f;
+    Run(40);
+    Near(sim[5].pos, held[0], 0.01f);
+    Near(sim[6].pos, held[1], 0.01f);
+    assert(!arm.moving && out[0] == goal[0]);
+}
+
+/* 过死点：末端沿两台电机连线的中垂线从两个肘中间穿过去。先走到助跑点，再走那条直线：规划的
+   关节角一路连续，两个肘的距离从不超过两根小臂的总长（不会让两台电机互相顶），到死点正好张到头、
+   末端是 arm_swing_speed，那一拍换侧。两头都是末端离两个肘的连线 arm_swing_run 的地方：关节角
+   一样，末端关于连线对称，所以甩过去、甩回来电机带末端的劲一样（实物上按离死点的距离取两头，
+   甩得过去、甩不回来）。 */
+static void TestSwing(void)
+{
+    Ready(); // q = (120, 60)：末端在两个肘连线的外侧 (0, 188.6)，side 0
+    assert(arm.side == 0U && !arm.swinging);
+    /* 两头：两个肘隔 2 × sqrt(150² - 100²) = 223.6，两根大臂在 121.2°、58.8°，肘连线在 y = 85.5，
+       末端在它两边各 100：外侧 (0, 185.5)，里侧 (0, -14.5)。死点在 y = 43.6，所以外侧那一段长
+       142、里侧只有 58。 */
+    const float run = arm_tune.swing_run, half = sqrtf(150.0f * 150.0f - run * run);
+    const float q_end = acosf((60.0f - half) / 100.0f) * MATH_RAD_TO_DEG;
+    const float line_y = 100.0f * sinf(q_end * MATH_DEG_TO_RAD), dead_y = 43.589f;
+    ClearPrinted();
+    assert(Arm_Swing() == ARM_OK && arm.moving && arm.swinging && swing.phase == SWING_APPROACH);
+    assert(Arm_Swing() == ARM_BUSY && Arm_MoveJoints(110.0f, 70.0f) == ARM_BUSY);
+    assert(Arm_MoveTo(0.0f, 150.0f) == ARM_BUSY && Arm_Follow(COLOR_RED) == HAL_BUSY);
+    float last[2] = {arm.sp[0], arm.sp[1]}, widest = 0.0f, cross_v = 0.0f, cross_gap = 1e9f;
+    unsigned ticks = 0U, run_ticks = 0U;
+    while (arm.moving)
+    {
+        uint8_t side = arm.side, running = swing.phase == SWING_RUN;
+        Tick();
+        assert(++ticks < 3000U);
+        float e[4];
+        Arm_Elbows(arm.sp[0], arm.sp[1], e);
+        float apart = hypotf(e[2] - e[0], e[3] - e[1]);
+        widest = fmaxf(widest, apart);
+        assert(apart <= 300.0f + 0.002f);
+        for (unsigned i = 0; i < 2U; ++i)
+            assert(fabsf(arm.sp[i] - last[i]) <= 720.0f * 0.005f); // 关节角不跳
+        last[0] = arm.sp[0];
+        last[1] = arm.sp[1];
+        if (running) // 末端在中垂线上：两个肘左右对称
+        {
+            ++run_ticks;
+            Near(e[0] + e[2], 0.0f, 0.02f);
+            Near(e[1], e[3], 0.02f);
+        }
+        if (arm.side != side) // 换侧那一拍：两个肘张到头，末端正全速穿过
+        {
+            cross_v = swing.v;
+            cross_gap = 300.0f - apart;
+        }
+    }
+    assert(arm.side == 1U && !arm.swinging && swing.phase == SWING_OFF);
+    Near(cross_v, arm_tune.swing_speed, 0.5f);
+    assert(cross_gap >= -0.002f && cross_gap < 0.03f);
+    Near(widest, 300.0f, 0.03f);
+    /* 两头的关节角一样；这一段长 2 × 100，死点前 142、死点后 58。 */
+    Near(swing.q_in[0], q_end, 0.01f);
+    Near(swing.q_in[1], 180.0f - q_end, 0.01f);
+    Near(swing.q_out[0], swing.q_in[0], 0.01f);
+    Near(swing.q_out[1], swing.q_in[1], 0.01f);
+    Near(swing.length, 2.0f * run, 0.01f);
+    Near(swing.cross, line_y + run - dead_y, 0.05f);
+    /* 助跑那一段走一半加到全速，过了死点在后一半距离里收住：一共 1.5 × 200 / 300 = 1 s。 */
+    assert(run_ticks >= 197U && run_ticks <= 205U);
+    float x, y;
+    assert(Arm_Forward(arm.sp[0], arm.sp[1], &x, &y));
+    Near(x, 0.0f, 0.05f);
+    Near(y, line_y - run, 0.05f);
+    Run(40); // 电机跟上
+    Near(arm.x, 0.0f, 0.3f);
+    Near(arm.y, line_y - run, 0.3f);
+    assert(strstr(printed, "ARM side 1\r\n") && Count("ARM done ") == 1U);
+    printf("swing: %u ticks on the line, elbows at most %.3f mm apart (forearms 300), %.0f mm/s "
+           "through the dead point\n",
+           run_ticks, (double)widest, (double)cross_v);
+
+    /* 再过一次就回来：已经在助跑点上，不用先走过去。这回死点前只有 58、死点后 142。 */
+    assert(Arm_Swing() == ARM_OK && swing.phase == SWING_RUN);
+    Near(swing.cross, dead_y - (line_y - run), 0.05f);
+    RUN_UNTIL(!arm.moving, 1000U);
+    assert(arm.side == 0U && Arm_Forward(arm.sp[0], arm.sp[1], &x, &y));
+    Near(y, line_y + run, 0.05f);
+
+    /* 半路急停：停在原地不再走，还没过死点就还在这一侧；对齐以后再过，先走回助跑点。 */
+    assert(Arm_Swing() == ARM_OK);
+    Run(30);
+    assert(swing.phase == SWING_RUN && !swing.crossed);
+    Arm_Stop();
+    assert(!arm.moving && !arm.swinging && swing.phase == SWING_OFF && arm.side == 0U);
+    Run(60);
+    float held[2] = {sim[5].pos, sim[6].pos};
+    Run(100);
+    Near(sim[5].pos, held[0], 0.01f);
+    Near(sim[6].pos, held[1], 0.01f);
+    assert(Arm_Swing() == ARM_OK && swing.phase == SWING_APPROACH);
+    RUN_UNTIL(!arm.moving, 3000U);
+    assert(arm.side == 1U);
+
+    /* 过不了：限位不让大臂张到死点；两根小臂加起来比两个肘能拉开的还长，根本没有死点。 */
+    arm_tune.q1_max = 150.0f;
+    assert(Arm_Swing() == ARM_LIMIT && !arm.moving);
+    arm_tune.q1_max = 170.0f;
+    arm_tune.b1 = arm_tune.b2 = 165.0f; // 两个肘最远 120 + 2 × 100 = 320 < 330
+    assert(Arm_Swing() == ARM_REACH && !arm.moving);
+}
+
+/* 点位记着末端在哪一侧：去另一侧的点先过死点再走过去，走完才报一次 done；/arm j 带侧也一样。
+   没甩过去时把固件记的那一侧改回来，臂不动。 */
+static void TestSwingPoints(void)
+{
+    Ready();
+    ClearPrinted();
+    Cmd("arm point in 110 70 1");
+    assert(strcmp(printed, "ARM point in 110.00 70.00 1\r\n") == 0);
+    ClearPrinted();
+    Cmd("arm point out 110 70"); // 不写侧：现在这一侧
+    assert(strcmp(printed, "ARM point out 110.00 70.00 0\r\n") == 0);
+    ClearPrinted();
+    Cmd("arm go out");
+    assert(strcmp(printed, "OK   arm to q=110.00,70.00\r\n") == 0 && !arm.swinging);
+    RUN_UNTIL(!arm.moving, 2000U);
+    ClearPrinted();
+    Cmd("arm go in");
+    assert(strcmp(printed, "OK   arm swing, then to q=110.00,70.00\r\n") == 0 && arm.swinging);
+    RUN_UNTIL(!arm.moving, 3000U);
+    assert(arm.side == 1U && arm.sp[0] == 110.0f && arm.sp[1] == 70.0f);
+    Run(40);
+    assert(Count("ARM done ") == 1U && strstr(printed, "ARM side 1\r\n"));
+    Near(arm.x, 0.0f, 0.3f);
+    Near(arm.y, 93.97f - 116.73f, 0.3f); // 同一组关节角，末端在两个肘连线的另一侧
+    ClearPrinted();
+    Cmd("arm");
+    assert(strstr(printed, " move=0 side=1 follow=off\r\n"));
+    ClearPrinted();
+    Cmd("arm j 120 60 0");
+    assert(strcmp(printed, "OK   arm swing, then to q=120.00,60.00\r\n") == 0);
+    RUN_UNTIL(!arm.moving, 3000U);
+    Run(40);
+    assert(arm.side == 0U);
+    Near(arm.y, 188.58f, 0.3f);
+    ClearPrinted();
+    Cmd("arm save here");
+    assert(strstr(printed, "ARM point here ") && strstr(printed, " 0\r\n") &&
+           Arm_FindPoint("here")->side == 0U);
+
+    /* 没甩过去：改固件记的那一侧，臂不动，末端算到另一边。 */
+    float held[2] = {sim[5].pos, sim[6].pos};
+    ClearPrinted();
+    Cmd("arm side 1");
+    assert(strstr(printed, "OK   arm side 1\r\n") && arm.side == 1U);
+    Run(20);
+    assert(strstr(printed, "ARM side 1\r\n"));
+    Near(arm.y, 86.60f - 101.98f, 0.05f);
+    Near(sim[5].pos, held[0], 0.01f);
+    Near(sim[6].pos, held[1], 0.01f);
+    ClearPrinted();
+    Cmd("arm side 2");
+    assert(strstr(printed, "ERR  usage: /arm"));
+    /* 标定时改 arm_mode（上电那一侧）：也是在说臂现在就在那一侧。 */
+    Cmd("set arm_mode 1");
+    Run(2);
+    assert(arm.side == 1U);
+    Cmd("set arm_mode 0");
+    Run(2);
+    assert(arm.side == 0U);
+    RUN_UNTIL(!need_sync, 100U);
+    ClearPrinted();
+    Cmd("arm swing");
+    assert(strcmp(printed, "OK   arm swing\r\n") == 0);
+    ClearPrinted();
+    Cmd("arm swing");
+    assert(strcmp(printed, "BUSY arm moving, wait for ARM done\r\n") == 0);
+    RUN_UNTIL(!arm.moving, 3000U);
+    assert(arm.side == 1U);
+    arm_tune.q1_max = 150.0f;
+    ClearPrinted();
+    Cmd("arm swing");
+    assert(strcmp(printed, "ERR  arm: the swing or the point is outside the joint limits\r\n") ==
+           0);
+}
+
+/* 死点标定：两根小臂掰成一条线，两个肘的距离就是两根小臂的总长，按现在的关节角算出来。 */
+static void TestDeadPointCalibration(void)
+{
+    Ready();
+    ClearPrinted();
+    Cmd("arm deadpoint"); // 两个肘隔 220，离 300 远：没掰直
+    assert(strcmp(printed, "ERR  arm: the forearms are not in one line (the elbows are not about "
+                           "arm_b1 + arm_b2 apart)\r\n") == 0);
+    /* 实物的小臂比填的长 2 mm：松开，掰直，两根大臂张到 156.9°、23.1°（电机读数只到 0.1°），
+       两个肘隔 2 × (60 + 100 × cos 23.1°) = 303.96。 */
+    assert(Arm_SetFree(1U) == HAL_OK);
+    RUN_UNTIL(arm.state == ARM_FREE, 100U);
+    sim[5].pos += 156.9f - 120.0f;
+    sim[6].pos += 23.1f - 60.0f;
+    Run(10);
+    ClearPrinted();
+    Cmd("arm deadpoint");
+    assert(strcmp(printed, "OK   arm_b1 150.00 -> 151.98\r\nOK   arm_b2 150.00 -> 151.98\r\n") ==
+           0);
+    Near(arm_tune.b1, 151.98f, 0.006f);
+    Near(arm_tune.b2, 151.98f, 0.006f);
+}
+
+/* 实物的尺寸、图上的初始位置：末端在两个肘连线靠车右的一侧，车左的料盘要在另一侧才够得着。
+   过死点时末端在中线左边 37 mm，两个肘伸到车头车尾外面 x = ±235；过去以后三个料盘都够得着；
+   回初始位置先过回来。 */
+static void TestSwingFromPowerOnPose(void)
+{
+    Setup();
+    arm_tune = arm_tune_default;
+    sim[5].pos = sim[6].pos = 0.0f;
+    RUN_UNTIL(arm.state == ARM_READY && !need_sync, 100U);
+    assert(arm.side == 1U);
+    assert(Arm_MoveTo(0.0f, 140.0f) == ARM_SIDE);
+    assert(Arm_Swing() == ARM_OK);
+    uint8_t crossed = 0U;
+    unsigned ticks = 0U;
+    float peak = 0.0f, was[2] = {out[0], out[1]}, widest = 0.0f;
+    while (arm.moving)
+    {
+        uint8_t side = arm.side;
+        Tick();
+        ++ticks;
+        peak = fmaxf(peak, fmaxf(fabsf(out[0] - was[0]), fabsf(out[1] - was[1])) / 0.005f);
+        was[0] = out[0];
+        was[1] = out[1];
+        float e[4]; // 发给电机的位置（平滑开着，过死点那一段不平均）：两个肘照样张到头，不超
+        Arm_Elbows(out[0], out[1], e);
+        widest = fmaxf(widest, hypotf(e[2] - e[0], e[3] - e[1]));
+        if (arm.side != side)
+        {
+            Near(e[0], -235.0f, 0.5f);
+            Near(e[2], 235.0f, 0.5f);
+            Near(e[1], 37.16f, 0.5f);
+            crossed = 1U;
+        }
+    }
+    assert(crossed && arm.side == 0U && widest <= 470.002f && widest > 469.97f);
+    Run(40);
+    /* 停在两个肘连线外侧 100 mm：大臂在 143.6°、36.4°，连线在 y = 83.1。 */
+    Near(arm.x, 0.0f, 0.5f);
+    Near(arm.y, 83.11f + 100.0f, 0.5f);
+    Near(arm.q[0], 143.58f, 0.2f);
+    Near(arm.q[1], 36.42f, 0.2f);
+    printf("swing from the power-on pose: %.2f s in all, joints up to %.0f deg/s\n",
+           (double)ticks * 0.005, (double)peak);
+    static const float cups[3][2] = {{0.0f, 140.0f}, {-100.0f, 140.0f}, {100.0f, 140.0f}};
+    for (unsigned k = 0; k < 3U; ++k)
+    {
+        assert(Arm_MoveTo(cups[k][0], cups[k][1]) == ARM_OK);
+        RUN_UNTIL(!arm.moving, 6000U);
+        Run(40);
+        Near(arm.x, cups[k][0], 0.5f);
+        Near(arm.y, cups[k][1], 0.5f);
+    }
+    assert(Arm_MoveJointsSide(90.0f, 90.0f, 1U) == ARM_OK); // 回初始位置：先过回去
+    RUN_UNTIL(!arm.moving, 8000U);
+    Run(40);
+    assert(arm.side == 1U);
+    Near(arm.x, 0.0f, 0.5f);
+    Near(arm.y, -72.66f, 0.5f);
 }
 
 /* 跟随（相机装在 J1 那根小臂上，装歪了 30°，照片晚 60 ms 到）：静止的物料收敛到 1 mm 以内；
@@ -931,8 +1279,8 @@ static void TestConsole(void)
     ClearPrinted();
     Cmd("arm");
     assert(strncmp(printed, "          ARM READY q=120.00,60.00 xy=", 38) == 0);
-    assert(
-        strstr(printed, ",188.6 goal=120.00,60.00 move=0 follow=off\r\n          VIS OFF n=0\r\n"));
+    assert(strstr(
+        printed, ",188.6 goal=120.00,60.00 move=0 side=0 follow=off\r\n          VIS OFF n=0\r\n"));
     ClearPrinted();
     Cmd("arm j 130 70");
     assert(strcmp(printed, "OK   arm to q=130.00,70.00\r\n") == 0);
@@ -966,7 +1314,7 @@ static void TestConsole(void)
     assert(strstr(printed, "ARM point pick_1 ") && Arm_FindPoint("pick_1"));
     ClearPrinted();
     Cmd("arm point slot2 125.5 65");
-    assert(strcmp(printed, "ARM point slot2 125.50 65.00\r\n") == 0);
+    assert(strcmp(printed, "ARM point slot2 125.50 65.00 0\r\n") == 0);
     ClearPrinted();
     Cmd("arm point 2bad 0 0");
     assert(strstr(printed, "ERR  arm: point name is 1..11"));
@@ -1016,8 +1364,8 @@ static void TestConsole(void)
 
     ClearPrinted();
     Cmd("list arm_");
-    assert(Count("\r\n") == 25U &&
-           strstr(printed, "arm_j1_x        = -60.0  [-300.0..300.0] default -95.0"));
+    assert(Count("\r\n") == 28U &&
+           strstr(printed, "arm_j1_x        = -60.0  [-300.0..300.0] default -100.0"));
     ClearPrinted();
     Cmd("set arm_speed 180");
     assert(strcmp(printed, "OK   arm_speed 90 -> 180\r\n") == 0);
@@ -1067,7 +1415,9 @@ static void TestConsole(void)
 
 int main(void)
 {
+    setvbuf(stdout, NULL, _IONBF, 0); // 断言失败时前面打的行还在
     TestDrawingDefaults();
+    TestPowerOnPose();
     TestKinematics();
     TestStartupHoldsInPlace();
     TestJointMoveTogether();
@@ -1078,12 +1428,21 @@ int main(void)
     TestFaults();
     TestCalibrationChangesDoNotMove();
     TestPoints();
+    TestSmoothing();
+    TestSwing();
+    TestSwingPoints();
+    TestDeadPointCalibration();
+    TestSwingFromPowerOnPose();
     TestFollowArmCamera();
     TestFollowFixedCameraAndReach();
     TestConsole();
     printf(
         "PASS: five-bar kinematics and dead points, startup hold, synced joint moves, retarget, "
         "cartesian/path checks, free/teach/relock, stop, faults, zero/flip without motion, points, "
-        "follow (forearm and fixed camera, turntable, lost, out of reach), console formats\n");
+        "setpoint smoothing, "
+        "dead-point swing (line through the elbows, side tracking, points on the other side, "
+        "calibration, real sizes), follow (forearm and fixed camera, turntable, lost, out of "
+        "reach), "
+        "console formats\n");
     return 0;
 }

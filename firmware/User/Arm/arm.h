@@ -10,9 +10,16 @@
    由 Chassis_Init 做）。关节角、车体系、尺寸的定义见 arm_calib.h。
    单片机自己按限速和加速度规划，两台电机按距离比例同时出发同时到（关节空间走直线），每 10 ms
    给两台各发一次绝对位置（直通限速位置模式），位置、状态各 20 ms 读一次。五连杆不是每组关节角都
-   合得拢；两根小臂成一条线的地方是死点（那里两台电机管不住末端，会互相顶，或者机构翻到另一种
-   装配方式）：目标要合得拢，走过去的一路上离死点都要有 arm_margin。大小臂拉直或折叠只是够得着
-   的边，关节直着转过去没事，两个工作区之间就这么摆过去。
+   合得拢；两根小臂成一条线的地方是死点，那里两台电机管不住末端：平常的运动目标要合得拢，走过去
+   的一路上离死点都要有 arm_margin。大小臂拉直或折叠只是够得着的边，关节直着转过去没事。
+   同一组关节角，末端可以在两个肘连线的任一侧（两种装配方式），电机的读数分不出来，固件自己记着
+   （arm.side）：上电是 arm_mode，只有“过死点”（Arm_Swing）会换。两侧是两个工作区，实物上两根大臂
+   不能互相交叉着绕过去，要换工作区只能过死点：末端沿两台电机连线的中垂线走直线，从两个肘之间穿
+   过去。这样走，两台电机是张开到头、速度降到零、再收回来，一直是协调的，不会互相顶；死点上那
+   几毫米电机使不上劲，靠末端自己的惯性滑过去，所以过的时候要快（arm_swing_speed）。
+   下发给电机的位置是规划位置最近 arm_smooth 毫秒的平均：梯形速度变成加速度连续的 S 形，起步和
+   停下不冲；两个关节用同一个窗口，关节空间里还是同一条直线。过死点那一段不平均（会把张到头的
+   那一下削掉一点）。
    电机读数先按零点折到 ±180°，所以每个关节的行程必须在零点两边各 180° 以内（限位参数保证）。 */
 
 #define ARM_ADDR_J1             5U // J1 电机地址，按实车接线修改
@@ -39,6 +46,7 @@ typedef enum
     ARM_LIMIT, // 关节角超限位
     ARM_REACH, // 够不着：这个位置没有合得拢、离死点够远的姿态（或者现在的姿态就合不拢：尺寸不对）
     ARM_PATH,  // 走过去要经过死点附近，换个中间点绕过去
+    ARM_SIDE,  // 这个位置末端在另一侧才够得着：先过死点
 } arm_result;
 
 /* 等待和故障原因（arm.detail），i = 0 是 J1。 */
@@ -55,7 +63,8 @@ typedef struct
     float mode, margin;
     float zero1, zero2, flip1, flip2;
     float q1_min, q1_max, q2_min, q2_max;
-    float speed, acc;
+    float speed, acc, smooth;
+    float swing_speed, swing_run;
     float cam, cam_rot, cam_x, cam_y, cam_lag;
 } arm_tuning;
 
@@ -81,6 +90,9 @@ typedef struct
         .q2_max = ARM_Q2_MAX_DEG,                                                                  \
         .speed = ARM_SPEED_DEG_S,                                                                  \
         .acc = ARM_ACC_DEG_S2,                                                                     \
+        .smooth = ARM_SMOOTH_MS,                                                                   \
+        .swing_speed = ARM_SWING_MM_S,                                                             \
+        .swing_run = ARM_SWING_RUN_MM,                                                             \
         .cam = ARM_CAM,                                                                            \
         .cam_rot = ARM_CAM_ROT_DEG,                                                                \
         .cam_x = ARM_CAM_X_MM,                                                                     \
@@ -95,6 +107,7 @@ typedef struct
 {
     char name[ARM_NAME_MAX + 1U];
     float q[2];
+    uint8_t side; // 记这个点时末端在哪一侧
 } arm_point;
 
 typedef struct
@@ -102,6 +115,8 @@ typedef struct
     uint8_t state;            // arm_state
     uint8_t detail;           // 等待/故障原因，ARM_WHY_*
     uint8_t moving;           // 规划还没走完
+    uint8_t side;             // 末端在两个肘连线的哪一侧：从 J1 的肘看向 J2 的肘，左 0、右 1
+    uint8_t swinging;         // 正在过死点（包括先走到助跑点那一段）
     float q[2];               // 实测关节角，°
     float sp[2];              // 规划到的关节角（正在下发的位置），°
     float goal[2];            // 目标关节角，°
@@ -122,8 +137,20 @@ void Arm_Tick(void);
 
 // 关节空间走到 (q1, q2)：两台电机同时到，一路上离死点够远才接受。
 arm_result Arm_MoveJoints(float q1, float q2);
-// 末端走到车体系 (x, y)：逆解挑离现在最近、离死点够远的那组关节角。
+// 末端走到车体系 (x, y)：逆解挑离现在最近、离死点够远的那组关节角。只在末端现在这一侧找，
+// 另一侧才够得着返回 ARM_SIDE。
 arm_result Arm_MoveTo(float x, float y);
+// 过死点，换到另一侧：先走到助跑点（末端离两个肘的连线 arm_swing_run），再让末端沿直线从两个肘
+// 之间穿过去，停在连线另一边同样远的地方（两头的关节角一样）。要先停稳（正在动 BUSY）；这里
+// 摆不出那条线 REACH 或 LIMIT，去助跑点的路不通 PATH。
+arm_result Arm_Swing(void);
+// 关节空间走到 (q1, q2)，side 是记这组角度时末端在的那一侧：不在这一侧就先过死点再走过去。
+arm_result Arm_MoveJointsSide(float q1, float q2, uint8_t side);
+// 改固件记的那一侧，臂不动：没甩过去、末端落回原来那边时用。正在动 BUSY。
+HAL_StatusTypeDef Arm_SetSide(uint8_t side);
+// 死点标定：把两根小臂掰成一条线（松开或锁住都行）时调用，b = 按现在的关节角算出来的两根小臂
+// 长度（写进 arm_b1/2 生效）。两个肘的距离离 b1 + b2 超过一成 ERROR（没掰直），正在动 BUSY。
+HAL_StatusTypeDef Arm_DeadPoint(float b[2]);
 // 急停（S）：两台电机立即停，规划对齐到停下的位置，跟随取消；故障或等待时开始清故障。
 void Arm_Stop(void);
 // 1 = 松开电机（用手掰来示教），0 = 锁住；故障时 BUSY。
@@ -136,7 +163,7 @@ HAL_StatusTypeDef Arm_Follow(uint8_t color);
 // 视觉上位机每发来一帧物料就调用一次；frame_ms 是收到的时刻。
 void Arm_SeeMaterials(const VisionMaterial *materials, unsigned count, uint32_t frame_ms);
 
-// 正解：末端在车体系的位置；这组关节角合不拢返回 0。
+// 正解：末端在车体系的位置（按现在记的那一侧）；这组关节角合不拢返回 0。
 uint8_t Arm_Forward(float q1, float q2, float *x, float *y);
 // 两个肘的位置：elbow[0..1] = J1 的肘，elbow[2..3] = J2 的肘。
 void Arm_Elbows(float q1, float q2, float elbow[4]);
@@ -152,9 +179,9 @@ uint8_t Arm_CameraDirection(float *deg);
 // 按现在的姿态把相机看到的偏差（物料帧的 fwd/left）换算成车体系位置，给遥测显示用；合不拢返回 0。
 uint8_t Arm_CameraToBody(float fwd, float left, float *x, float *y);
 
-// 点位表：名字 1..11 个小写字母、数字或下划线，字母开头。存的是关节角，要在限位内。
-// SetPoint：新建或覆盖；名字或角度不对 ERROR，表满 BUSY。
-HAL_StatusTypeDef Arm_SetPoint(const char *name, float q1, float q2);
+// 点位表：名字 1..11 个小写字母、数字或下划线，字母开头。存的是关节角和末端在哪一侧，角度要在
+// 限位内。SetPoint：新建或覆盖；名字或角度不对 ERROR，表满 BUSY。
+HAL_StatusTypeDef Arm_SetPoint(const char *name, float q1, float q2, uint8_t side);
 HAL_StatusTypeDef Arm_DeletePoint(const char *name); // 没有这个点 ERROR
 const arm_point *Arm_FindPoint(const char *name);
 unsigned Arm_PointCount(void);

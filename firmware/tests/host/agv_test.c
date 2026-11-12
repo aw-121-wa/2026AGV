@@ -187,10 +187,18 @@ static void MoveToField(float fx, float fy)
     chassis.pos_y = s * dx + c * dy;
 }
 
-static void Run(unsigned zone, unsigned limit)
+/* 上电（不自己走），再从 zone 出发。 */
+static void Start(unsigned zone)
 {
     test_zone = (uint16_t)zone;
-    Agv_Init(AGV_MODE_SURVEY, zone);
+    Agv_Init(AGV_MODE_SURVEY);
+    assert(agv.state == AGV_IDLE);
+    assert(Agv_Start(zone) == HAL_OK && agv.state == AGV_WAIT && agv.zone == zone);
+}
+
+static void Run(unsigned zone, unsigned limit)
+{
+    Start(zone);
     for (unsigned n = 0; n < limit && agv.state != AGV_DONE && agv.state != AGV_FAULT; ++n)
         tick();
 }
@@ -223,36 +231,75 @@ int main(void)
             assert(a.x == b.x || a.y == b.y);
         }
     }
+    /* 上电不自己走：一直等 /start；出发区只能是 1、2；底盘没 READY 或在动不接受。 */
+    Reset();
+    Agv_Init(AGV_MODE_SURVEY);
+    for (unsigned n = 0; n < 4000; ++n)
+        tick();
+    assert(agv.state == AGV_IDLE && agv.zone == 0U && follow_calls == 0U);
+    assert(Agv_Start(0) == HAL_ERROR && Agv_Start(3) == HAL_ERROR && agv.state == AGV_IDLE);
+    chassis.state = CHASSIS_STATE_IDLE;
+    assert(Agv_Start(1) == HAL_BUSY && agv.state == AGV_IDLE);
+    chassis.state = CHASSIS_STATE_READY;
+    chassis.mode = CHASSIS_MODE_PATH;
+    assert(Agv_Start(1) == HAL_BUSY && agv.state == AGV_IDLE);
+    chassis.mode = CHASSIS_MODE_VEL;
+    /* 跑着不能再开始；跑完、停了以后放回去可以再开始，换个出发区也行。 */
+    Reset();
+    Run(1, 200000);
+    assert(agv.state == AGV_DONE);
+    Reset();
+    test_zone = 2U;
+    assert(Agv_Start(2) == HAL_OK && agv.state == AGV_WAIT && agv.zone == 2U && agv.covered == 0U);
+    for (unsigned n = 0; n < 200 && agv.state != AGV_DRIVE; ++n)
+        tick();
+    assert(agv.state == AGV_DRIVE && Agv_Start(2) == HAL_BUSY);
+    Agv_Stop();
+    assert(agv.state == AGV_STOPPED);
+    for (unsigned n = 0; n < 200000 && agv.state != AGV_DONE; ++n)
+        tick();
+    assert(agv.state == AGV_STOPPED && follow_calls == 0U);
+    Reset();
+    test_zone = 2U;
+    assert(Agv_Start(2) == HAL_OK);
+    for (unsigned n = 0; n < 200000 && agv.state != AGV_DONE && agv.state != AGV_FAULT; ++n)
+        tick();
+    assert(agv.state == AGV_DONE && agv.covered == 0x0fffU && follow_calls == 1U);
+    assert(fabsf(agv.x - 2250.0f) < 5.0f && fabsf(agv.y - 150.0f) < 5.0f);
+    /* 没在跑的时候 S 不改状态：跑完的还是跑完。 */
+    Agv_Stop();
+    assert(agv.state == AGV_DONE);
     /* 停车锁存：不再下发任何路径。 */
     Reset();
-    Agv_Init(AGV_MODE_SURVEY, 1);
+    Start(1);
     Agv_Stop();
     for (unsigned n = 0; n < 1000; ++n)
         tick();
     assert(agv.state == AGV_STOPPED && follow_calls == 0U);
-    /* 非巡检模式只置空闲，不产生运动。 */
+    /* 非巡检模式只置空闲，不产生运动，也不接受开始。 */
     Reset();
-    Agv_Init(AGV_MODE_COMPETITION, 1);
+    Agv_Init(AGV_MODE_COMPETITION);
+    assert(Agv_Start(1) == HAL_ERROR);
     for (unsigned n = 0; n < 1000; ++n)
         tick();
     assert(agv.state == AGV_IDLE && follow_calls == 0U);
     /* 出发区被占：READY 后第一次位姿检查就失败，不会启动路径。 */
     Reset();
-    Agv_Init(AGV_MODE_SURVEY, 1);
+    Start(1);
     assert(Map_AddObstacle(2250, 2250, 25));
     for (unsigned n = 0; n < 2000 && agv.state != AGV_FAULT; ++n)
         tick();
     assert(agv.state == AGV_FAULT && agv.error == AGV_ERR_POSE && follow_calls == 0U);
-    /* 底盘一直没 READY：超时进 AGV_ERR_READY。 */
+    /* 开始以后底盘掉出 READY 一直不回来：超时进 AGV_ERR_READY。 */
     Reset();
+    Start(1);
     chassis.state = CHASSIS_STATE_IDLE;
-    Agv_Init(AGV_MODE_SURVEY, 1);
     for (unsigned n = 0; n < 4000; ++n)
         tick();
     assert(agv.state == AGV_FAULT && agv.error == AGV_ERR_READY && follow_calls == 0U);
     /* 底盘故障不能被当成走完。 */
     Reset();
-    Agv_Init(AGV_MODE_SURVEY, 1);
+    Start(1);
     for (unsigned n = 0; n < 1000 && agv.state == AGV_WAIT; ++n)
         tick();
     chassis.state = CHASSIS_STATE_FAULT;
@@ -260,14 +307,14 @@ int main(void)
     assert(agv.state == AGV_FAULT && agv.error == AGV_ERR_CHASSIS && agv.covered == 0U);
     /* 通道被堵：规划失败，不能抄近路。 */
     Reset();
-    Agv_Init(AGV_MODE_SURVEY, 1);
+    Start(1);
     assert(Map_AddObstacle(1605, 2055, 200));
     for (unsigned n = 0; n < 20000 && agv.state != AGV_FAULT; ++n)
         tick();
     assert(agv.state == AGV_FAULT && agv.covered != 0x0fffU && follow_calls == 0U);
     /* 地图在规划之后变化：已规划的路径作废。 */
     Reset();
-    Agv_Init(AGV_MODE_SURVEY, 1);
+    Start(1);
     for (unsigned n = 0; n < 1000 && agv.state == AGV_WAIT; ++n)
         tick();
     assert(Map_AddObstacle(1200, 1200, 25));
@@ -278,7 +325,7 @@ int main(void)
        同时把车挪到场地中部，留出 3° 的旋转余量。 */
     Reset();
     busy_left = 100000U;
-    Agv_Init(AGV_MODE_SURVEY, 1);
+    Start(1);
     for (unsigned n = 0; n < 1000 && agv.state == AGV_WAIT; ++n)
         tick();
     MoveToField(1205.0f, 1205.0f);
@@ -304,7 +351,7 @@ int main(void)
     assert(agv.state == AGV_FAULT && agv.error == AGV_ERR_POSE);
     /* 规划途中车身擦出场地：物理间隙不足要判故障。 */
     Reset();
-    Agv_Init(AGV_MODE_SURVEY, 1);
+    Start(1);
     for (unsigned n = 0; n < 2000 && agv.state != AGV_DRIVE; ++n)
         tick();
     assert(agv.state == AGV_DRIVE);
@@ -313,7 +360,7 @@ int main(void)
     assert(agv.state == AGV_FAULT && agv.error == AGV_ERR_POSE);
     /* 路径迟迟走不完：按整圈航程估算的总超时进 AGV_ERR_TIMEOUT。 */
     Reset();
-    Agv_Init(AGV_MODE_SURVEY, 1);
+    Start(1);
     freeze = 1;
     for (unsigned n = 0; n < 200000 && agv.state != AGV_FAULT; ++n)
         tick();
@@ -329,6 +376,7 @@ int main(void)
     busy_left = 100000;
     Run(1, 20000);
     assert(agv.state == AGV_FAULT && agv.error == AGV_ERR_READY && follow_calls == 0U);
-    puts("runner both docks, continuous tour coverage, stop latch, BUSY retry, timeouts OK");
+    puts("runner both docks, waits for /start with a zone, restart after done or stop, continuous "
+         "tour coverage, stop latch, BUSY retry, timeouts OK");
     return 0;
 }

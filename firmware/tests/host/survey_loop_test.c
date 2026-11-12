@@ -25,13 +25,32 @@ static void Ask(const char *line)
     drain(&uart);
 }
 
+/* 上电不走：等调试台发 /start <出发区>。出发区不给、给错都不走。 */
 static void RunTour(unsigned zone)
 {
-    Agv_Init(AGV_MODE_SURVEY, zone);
-    assert(agv.state == AGV_WAIT);
+    Agv_Init(AGV_MODE_SURVEY);
+    for (unsigned i = 0; i < 1000U; ++i)
+    {
+        plant();
+        Agv_Tick();
+    }
+    assert(agv.state == AGV_IDLE && chassis.mode == CHASSIS_MODE_VEL);
     tx_log[0] = 0;
     Ask("/route\r\n"); // 开走之前没有路线可以报
     assert(strstr(tx_log, "ROUTE none\r\n"));
+    tx_log[0] = 0;
+    Ask("/start\r\n");
+    Ask("/start 3\r\n");
+    assert(strstr(tx_log, "ERR  usage: /start <1|2>") && agv.state == AGV_IDLE);
+    tx_log[0] = 0;
+    char start[16];
+    snprintf(start, sizeof(start), "/start %u\r\n", zone);
+    Ask(start);
+    char ok[32];
+    snprintf(ok, sizeof(ok), "OK   survey from zone %u\r\n", zone);
+    assert(strstr(tx_log, ok) && agv.state == AGV_WAIT && agv.zone == zone);
+    Ask(start); // 已经在跑
+    assert(strstr(tx_log, "BUSY survey running, S stops it\r\n"));
     tx_log[0] = 0;
     float peak = 0;
     /* 整圈约 14 m、150 mm/s：理想用时约 100 s，留足余量。 */
@@ -62,11 +81,12 @@ static void RunTour(unsigned zone)
     assert(strstr(tx_log, "DONE path: time="));
     const char *line = strstr(tx_log, "          AGV state=6 err=0 leg=");
     assert(line);
-    unsigned state, error, leg, covered;
+    unsigned state, error, leg, covered, line_zone;
     float x, y, residual;
-    assert(sscanf(line, " AGV state=%u err=%u leg=%u covered=0x%x field=(%f,%f) residual=%f",
-                  &state, &error, &leg, &covered, &x, &y, &residual) == 7);
-    assert(strstr(line, "mm\r\n"));
+    assert(sscanf(line,
+                  " AGV state=%u err=%u leg=%u covered=0x%x field=(%f,%f) residual=%fmm zone=%u",
+                  &state, &error, &leg, &covered, &x, &y, &residual, &line_zone) == 8);
+    assert(line_zone == zone && strstr(line, "\r\n") == strstr(line, "zone=") + 6);
     assert(covered == ALL_EDGES);
     assert(hypotf(x - AGV_START_X_MM, y - AGV_START_Y_MM(zone)) <= AGV_POSITION_TOL_MM);
 

@@ -160,13 +160,22 @@ function testDisturbance(block, model) {
   assert(checked === 4);
 }
 
-/* 位置冲过头：假车的轮子比下发的晚（延迟 + 惯性），按刹车曲线停不住，冲过去“车速 × 滞后”再退回来。
-   日志里只有下发的车速，也看得出来；转向没有这一项。 */
+/* 位置冲过头：日志里只有下发的车速，按它沿走的方向积分，最远到过哪里减最后停在哪里。
+   合成一段：400 mm/s 走 0.5 s，再 -100 mm/s 退 0.2 s，退回来 20 mm。
+   假车的轮子比下发的晚（延迟 + 惯性），固件的刹车曲线按 path_lag 提前减速（chassis_path.inc），
+   1000 mm/s 停下只多滑几毫米；不提前要冲过去“车速 × 滞后”（60 mm）再倒回来。转向没有这一项。 */
 function testOverrun(block) {
+  const n = 160, rec = {
+    n, params: { heading_tol: 0.1 }, motion: new Uint8Array(n).fill(3), moving: new Uint8Array(n).fill(1),
+    target: new Float64Array(n), yaw: new Float64Array(n), vx: new Float64Array(n), vy: new Float64Array(n),
+  };
+  for (let k = 0; k < 140; ++k) rec.vx[k] = k < 100 ? 400 : -100;
+  near(T.recordMetrics(rec)[0].overrun, 20, 0.01, 'synthetic overrun, mm');
+
   const all = block.records.flatMap(r => T.recordMetrics(r));
   const moves = all.filter(m => m.kind === 'move');
   assert(moves.length === 4 && all.filter(m => m.kind === 'turn').every(m => m.overrun === 0));
-  for (const m of moves) near(m.overrun, m.speed * (block.car.tau + block.car.delay), 10, 'position overrun, mm');
+  for (const m of moves) assert(m.overrun < 8, `position overrun ${m.overrun} mm at ${m.speed} mm/s`);
 }
 
 /* 车上现在的参数：日志里的其他参数 + chassis.h 现在的默认增益。 */

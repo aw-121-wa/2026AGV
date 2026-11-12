@@ -10,6 +10,18 @@
    转速都用这个值换算，实测偏小会让车一直多走。按 2400/2436 标定成 78.16，里程和速度一起修正。
    现场还可以停机用 /set wheel_dia 微调。 */
 #define CHASSIS_WHEEL_DIA_MM 78.16f
+/* 横移系数 = 实际横移 / 按轮子转的圈数算出来的横移。麦轮侧移时辊子打滑，同样的轮子转数横着走得比
+   前后少，轮径是按前后标的（上面），横移要单独一个系数：L2400 实走约 2324 mm → 0.968。
+   下发的 vy 除以它（多转一点才走够），里程计和路径预测的横向位移乘以它。现场停车用
+   /set lateral_scale 微调。 */
+#define CHASSIS_LATERAL_SCALE 0.968f
+/* 横移带前后 = 横移时每往左走 1 mm，车实际往前偏多少 mm。两组对角轮（LF/RR、RF/LR）的有效半径、
+   辊子不完全一样，横移时一组正转一组反转，走得不一样多，车就斜着走；轮子算的前后位移是 0，
+   里程计看不见。R2400 原来往后偏约 40 mm，按 0.0167 补了以后还往后偏 10 mm，再加 10 / 2400 → 0.0208
+   （往右横移往后偏，往左就往前偏）。
+   下发时先反着补（vx 减去 系数 × vy），里程计和路径预测的前后位移加上 系数 × 横移，偏了路径
+   控制能看见、会修回来。现场停车用 /set lateral_skew 微调：往右走往后偏就加大，往前偏就减小。 */
+#define CHASSIS_LATERAL_SKEW 0.0208f
 #define CHASSIS_LX_MM        210.0f // 轴距：前后轮中心距
 #define CHASSIS_LY_MM        230.4f // 轮距：左右轮中心距
 #define CHASSIS_GEAR_RATIO   1.0f   // 电机转数/轮转数，直驱填 1.0
@@ -182,6 +194,10 @@ extern chassis_t chassis;
 #ifndef CHASSIS_PATH_CORNER_FACTOR
 #define CHASSIS_PATH_CORNER_FACTOR 1.0f
 #endif
+/* 路径刹车提前量：命令到轮子真变速的滞后（驱动器、电机、车身惯量），刹车曲线按它提前开始减速
+   （chassis_path.inc 的 Chassis_BrakeSpeed）。小了冲过头再倒回来，大了到点前多蹭一会儿。
+   自动调参拟合的“惯性 + 延迟”就是它的量级；现场用 /set path_lag 调。 */
+#define CHASSIS_PATH_LAG_MS 60.0f
 
 /* 运行时可调的参数，字段名就是串口控制台里的参数名（console.c）。上面的宏是开机默认值，
    定稿的值写回宏里。只在底盘任务里读写（控制台也在底盘任务里运行），不需要加锁。 */
@@ -193,7 +209,8 @@ typedef struct
     float distance_kp, distance_tol, heading_tol, settle_ms;
     float acc_linear, acc_angular;
     float cmd_speed;
-    float wheel_dia, chassis_k, path_deviation;
+    float wheel_dia, chassis_k, path_deviation, lateral_scale, lateral_skew;
+    float path_lag;
 } chassis_tuning;
 
 #define CHASSIS_TUNE_DEFAULTS                                                                      \
@@ -216,6 +233,9 @@ typedef struct
         .wheel_dia = CHASSIS_WHEEL_DIA_MM,                                                         \
         .chassis_k = CHASSIS_K_MM,                                                                 \
         .path_deviation = CHASSIS_PATH_DEVIATION_MM,                                               \
+        .lateral_scale = CHASSIS_LATERAL_SCALE,                                                    \
+        .lateral_skew = CHASSIS_LATERAL_SKEW,                                                      \
+        .path_lag = CHASSIS_PATH_LAG_MS,                                                           \
     }
 
 extern chassis_tuning chassis_tune;

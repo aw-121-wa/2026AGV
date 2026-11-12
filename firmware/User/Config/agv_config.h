@@ -55,10 +55,12 @@
 #ifndef AGV_SURVEY_LAPS
 #define AGV_SURVEY_LAPS 1U // 完整覆盖圈数，仅最后一圈入库
 #endif
-/* 跑图拐角：1 = 每个航点停稳再走（默认），0 = 连续过弯（拐角插贝塞尔圆弧，对照用）。
-   90° 拐角上 LF/RR 两个轮子要从 +v 走到 -v，连续过弯时它们是在车还动着的时候穿过 0 RPM，
-   带负载时驱动器会判堵转（Cgp_TF）直接断输出；停稳再换向时，过零点对应的是“命令 0 速”，
-   不会触发保护。实测仿真圈速 23.6 s（连续过弯 20.9 s），只慢 2.7 s。 */
+/* 跑图拐角：1 = 拐角停稳再走（默认），0 = 连续过弯（拐角插贝塞尔圆弧，对照用）。
+   逐段停车只在真拐角停：直线上穿过路口的航点（共线、航向不变）直接过去；拐角停在 path_deviation
+   以内就算到，等四个轮子实测停了再换方向。90° 拐角上 LF/RR 要从 +v 换到 -v，车还在滑的时候换向就是
+   带着负载过零。原来实车拐不过去，是因为刹车曲线没算轮子的滞后：1200 mm/s 冲过航点 50~70 mm，
+   再以几百 mm/s 倒回来追；现在刹车按 path_lag 提前（chassis.h）。
+   仿真圈速 22.8 s，连续过弯 23.3 s。 */
 #ifndef AGV_STOP_EACH_SEGMENT
 #define AGV_STOP_EACH_SEGMENT 1U
 #endif
@@ -72,7 +74,7 @@
 
 /* 串口指令模式（F/B/L/R/T/A）的移动速度 mm/s。 */
 #ifndef CHASSIS_COMMAND_SPEED_MM_S
-#define CHASSIS_COMMAND_SPEED_MM_S 1000.0f
+#define CHASSIS_COMMAND_SPEED_MM_S 1200.0f // 和跑图一样快；比赛模式开车也用它（cmd_speed）
 #endif
 
 #define AGV_SEARCH_BUDGET  32U // 每拍 A* 最多扩展的节点数

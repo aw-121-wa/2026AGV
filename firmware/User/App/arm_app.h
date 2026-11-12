@@ -9,11 +9,12 @@
    跟随时只找那个颜色，不跟时找全部，调试台上画出来。
    串口输出（调试台按这些格式解析）：
      周期状态行后面两行，/arm 也打：
-       ARM <WAIT|READY|FREE|FAULT> q=<q1>,<q2> xy=<x>,<y> goal=<q1>,<q2> move=<0|1> follow=<跟随>
-           [ | waiting: <原因> | fault: <原因> (send S)]
+       ARM <WAIT|READY|FREE|FAULT> q=<q1>,<q2> xy=<x>,<y> goal=<q1>,<q2> move=<0|1> side=<0|1>
+           follow=<跟随>[ | waiting: <原因> | fault: <原因> (send S)]
        VIS <ON|OFF> n=<个数>[ <颜色>:<x>,<y>]...       物料按现在的姿态换算到车体系，mm
      有变化时：ARM state ...、ARM done q=.. xy=..（一次运动走完）、ARM follow <跟随>、
-             ARM vision ONLINE|OFFLINE
+             ARM vision ONLINE|OFFLINE、ARM side <0|1>（末端在哪一侧，开机和过死点那一拍打）
+     点位：ARM point <名字> <q1> <q2> <侧>
    <跟随> = off，或 <颜色>:<looking|tracking|far>（没看到 / 跟着 / 够不着，停在最近的地方）。
    颜色名：red yellow blue green black lightblue（编号 1..6，同任务码）。 */
 

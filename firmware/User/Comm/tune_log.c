@@ -102,9 +102,11 @@ static void LogSendLine(void)
             ChassisTelemetry_Num(p->distance_tol, 2));
     else if (log_line == 3U)
         ChassisTelemetry_Printf(
-            "LOG param heading_brake=%s heading_ff_x=%s heading_ff_y=%s max_wheel_rpm=%u\r\n",
+            "LOG param heading_brake=%s heading_ff_x=%s heading_ff_y=%s max_wheel_rpm=%u "
+            "lateral_scale=%s lateral_skew=%s\r\n",
             ChassisTelemetry_Num(p->heading_brake, 0), ChassisTelemetry_Num(p->heading_ff_x, 2),
-            ChassisTelemetry_Num(p->heading_ff_y, 2), (unsigned)CHASSIS_MAX_WHEEL_RPM);
+            ChassisTelemetry_Num(p->heading_ff_y, 2), (unsigned)CHASSIS_MAX_WHEEL_RPM,
+            ChassisTelemetry_Num(p->lateral_scale, 3), ChassisTelemetry_Num(p->lateral_skew, 4));
     else if (log_line - LOG_HEAD_LINES < log_count)
     {
         unsigned i = log_line - LOG_HEAD_LINES;

@@ -228,13 +228,15 @@ static void Chassis_Solve(const chassis_vel *v, int16_t out[CHASSIS_WHEEL_NUM])
     /* 轮子转一圈移动 πD，mm/s -> 0.1 RPM */
     const float rpm_x10_per_mmps = 600.0f * CHASSIS_GEAR_RATIO / (MATH_PI * chassis_tune.wheel_dia);
     const float w_mm = chassis_tune.chassis_k * v->wz * MATH_DEG_TO_RAD;
+    const float vy = v->vy / chassis_tune.lateral_scale;        // 横移打滑：轮子多转一点
+    const float vx = v->vx - chassis_tune.lateral_skew * v->vy; // 横移带出来的前后先补掉
     float raw[CHASSIS_WHEEL_NUM];
     float peak = 0.0f;
 
     for (uint8_t i = 0; i < CHASSIS_WHEEL_NUM; ++i)
     {
         float v_wheel =
-            (float)k_sign[i][0] * v->vx + (float)k_sign[i][1] * v->vy + (float)k_sign[i][2] * w_mm;
+            (float)k_sign[i][0] * vx + (float)k_sign[i][1] * vy + (float)k_sign[i][2] * w_mm;
         raw[i] = v_wheel * rpm_x10_per_mmps;
         if (fabsf(raw[i]) > peak)
             peak = fabsf(raw[i]);
@@ -405,8 +407,8 @@ static void Chassis_UpdateOdometry(void)
         s_odom_valid = 1U;
         return;
     }
-    float dx = 0.25f * (d[0] + d[1] + d[2] + d[3]);
-    float dy = 0.25f * (-d[0] + d[1] + d[2] - d[3]);
+    float dy = 0.25f * (-d[0] + d[1] + d[2] - d[3]) * chassis_tune.lateral_scale;
+    float dx = 0.25f * (d[0] + d[1] + d[2] + d[3]) + chassis_tune.lateral_skew * dy;
 #if CHASSIS_USE_IMU
     float rad = chassis.yaw * MATH_DEG_TO_RAD;
 #else

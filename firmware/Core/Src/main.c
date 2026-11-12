@@ -132,7 +132,7 @@ int main(void)
   {
     Error_Handler();
   }
-  Agv_Init(AGV_MODE, AGV_START_ZONE);
+  Agv_Init(AGV_MODE); // 巡检模式等调试台发 /start <出发区> 才走
 #if AGV_MODE == AGV_MODE_COMPETITION
   if (Comp_Init(AGV_START_ZONE) != HAL_OK) // 比赛模式：C1 雷达(USART1) + 视觉上位机(USART2) + 扫码模块(USART3)
   {

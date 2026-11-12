@@ -221,10 +221,10 @@ static void PrintStatus(uint32_t now)
     ChassisTelemetry_Printf("\r\n");
 #if AGV_MODE == AGV_MODE_SURVEY
     ChassisTelemetry_Printf("          AGV state=%u err=%u leg=%u covered=0x%03x field=(%s,%s) "
-                            "residual=%smm\r\n",
+                            "residual=%smm zone=%u\r\n",
                             (unsigned)agv.state, (unsigned)agv.error, (unsigned)agv.leg,
                             (unsigned)agv.covered, Num(agv.x, 1), Num(agv.y, 1),
-                            Num(agv.home_residual_mm, 2));
+                            Num(agv.home_residual_mm, 2), (unsigned)agv.zone);
 #elif AGV_MODE == AGV_MODE_COMPETITION
     ChassisTelemetry_Printf("          POSE (%s,%s,%s)\r\n", Num(comp.x, 1), Num(comp.y, 1),
                             Num(comp.heading_deg, 2));
@@ -414,8 +414,10 @@ static void PrintPlot(void)
         /* 四轮实测转速按运动学正解换成车体速度，和里程计同一套符号。 */
         const float *rpm = chassis.wheel_rpm_meas;
         float mm_per_s = MATH_PI * chassis_tune.wheel_dia / (60.0f * CHASSIS_GEAR_RATIO);
-        float vx = 0.25f * mm_per_s * (rpm[0] + rpm[1] + rpm[2] + rpm[3]);
-        float vy = 0.25f * mm_per_s * (-rpm[0] + rpm[1] + rpm[2] - rpm[3]);
+        float vy =
+            0.25f * mm_per_s * (-rpm[0] + rpm[1] + rpm[2] - rpm[3]) * chassis_tune.lateral_scale;
+        float vx =
+            0.25f * mm_per_s * (rpm[0] + rpm[1] + rpm[2] + rpm[3]) + chassis_tune.lateral_skew * vy;
         ChassisTelemetry_Printf("plot:%s,%s,%s,%s,%s,%s\r\n", Num(chassis.target.vx, 1),
                                 Num(chassis.target.vy, 1), Num(chassis.current.vx, 1),
                                 Num(chassis.current.vy, 1), Num(vx, 1), Num(vy, 1));

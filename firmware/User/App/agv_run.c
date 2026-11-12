@@ -29,17 +29,23 @@ static void Fail(AgvError error)
     agv.state = AGV_FAULT;
 }
 
-/* 外部停车入口：停车并切到停止态。 */
+/* 在跑（等底盘、出库、规划、行驶、入库）。 */
+static uint8_t Running(void)
+{
+    return agv.state >= AGV_WAIT && agv.state <= AGV_DOCK_IN;
+}
+
+/* 外部停车入口：停车；正在跑的这一趟记成停止，没在跑的状态不变。 */
 void Agv_Stop(void)
 {
     Chassis_Stop();
-    agv.state = AGV_STOPPED;
+    if (Running())
+        agv.state = AGV_STOPPED;
 }
 
-/* 按运行模式初始化任务：巡检模式建图并规划覆盖路线，其他模式置为空闲。 */
-void Agv_Init(unsigned mode, unsigned zone)
+/* 清掉上一趟的全部进度。 */
+static void Clear(void)
 {
-    run_mode = mode;
     agv = (AgvStatus){0};
     anchored = direct = heading_bad = 0;
     since = HAL_GetTick();
@@ -48,20 +54,33 @@ void Agv_Init(unsigned mode, unsigned zone)
     planned_lap = tour_count = planned_covered = executing = start_pending = 0;
     tour_length_mm = 0.0f;
     exec_since = exec_timeout_ms = 0U;
-    if (mode != AGV_MODE_SURVEY)
-    {
-        agv.state = AGV_IDLE;
-        return;
-    }
+}
+
+void Agv_Init(unsigned mode)
+{
+    run_mode = mode;
+    Clear();
+    agv.state = AGV_IDLE;
+}
+
+HAL_StatusTypeDef Agv_Start(unsigned zone)
+{
+    if (run_mode != AGV_MODE_SURVEY || zone < 1U || zone > 2U)
+        return HAL_ERROR;
+    if (Running() || chassis.state != CHASSIS_STATE_READY || chassis.mode != CHASSIS_MODE_VEL)
+        return HAL_BUSY;
+    Clear();
+    agv.zone = (uint8_t)zone;
     Map_Init();
     Survey_Init(zone);
     if (!Map_StartPoint(zone, &home))
     {
         Fail(AGV_ERR_POSE);
-        return;
+        return HAL_OK;
     }
     gateway = Survey_Gateway(zone);
     agv.state = AGV_WAIT;
+    return HAL_OK;
 }
 
 /* 用起始位姿把底盘里程计换算成场地坐标。 */
@@ -198,9 +217,8 @@ void Agv_Tick(void)
             Fail(AGV_ERR_READY);
             return;
         }
-        if (chassis.state != CHASSIS_STATE_READY || chassis.mode != CHASSIS_MODE_VEL ||
-            now - since < AGV_START_DELAY_MS)
-            return;
+        if (chassis.state != CHASSIS_STATE_READY || chassis.mode != CHASSIS_MODE_VEL)
+            return; // 开始的时候是 READY 的，这里只等它刚好掉出 READY 又回来
         origin_x = chassis.pos_x;
         origin_y = chassis.pos_y;
         origin_yaw = chassis.yaw;

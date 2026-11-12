@@ -8,12 +8,17 @@
 #define ARM_RETRY_DIV      20U    // 使能、松开、清故障每 100 ms 重发
 #define ARM_SPEED_MARGIN   1.25f  // 下发的限速比规划速度高一点，电机赶得上下一个点
 #define ARM_MIN_RPM_X10    10U    // 限速至少 1 RPM，最后一点误差也能走完
+#define ARM_SWING_RPM_X10  100U   // 过死点时限速至少 10 RPM，见 SendSetpoints
+#define ARM_SMOOTH_MAX     40U    // 平滑窗口最多这么多拍（200 ms）
 #define ARM_STOP_SETTLE_MS 30U    // 急停后等这么久再读位置对齐：电机停稳了
 #define ARM_HISTORY        32U    // 关节角历史（20 ms 一个，0.64 s），查拍照那一刻臂在哪
 #define ARM_DEADBAND_MM    0.5f   // 跟随时目标挪动不到这么多就不重新规划
 #define ARM_PATH_STEP      1.0f   // 查路径时关节空间每 1° 查一次离死点多远
 #define ARM_SAME_MM        0.5f   // 逆解的四种组合，正解回去离目标这么近才算同一种装配方式
 #define ARM_REACH_STEPS    12U    // 物料够不着：沿着朝它的方向二分找能走到的最远处
+#define ARM_SWING_STEP_MM  2.0f   // 找死点、查过死点的那条线：每 2 mm 一个点
+#define ARM_SWING_SCAN_MM  200.0f // 在中垂线上离两台电机连线这么远以内找死点
+#define ARM_SWING_JUMP_DEG 20.0f  // 那条线上相邻两点的关节角差这么多就是跳支了，不走
 
 /* 挂着等发的命令。一台驱动器一拍最多收两帧（见 ZDT_Flush），命令一拍只发一条。 */
 enum
@@ -33,6 +38,10 @@ static uint32_t cycle;
 static float base[2];          // 关节角为 0 时的电机读数（多圈）
 static float vel[2];           // 规划速度，°/s
 static float vmax[2], amax[2]; // 这次运动分给各关节的限速和加速度：按距离分，两个关节同时到
+/* 发给电机的位置 = 规划位置（arm.sp）最近 arm_smooth 毫秒的平均。 */
+static float ring[2][ARM_SMOOTH_MAX];
+static unsigned ring_at, ring_n; // 下一个写哪格、窗口现在多少拍
+static float out[2], out_vel[2]; // 平均以后的位置和速度，°、°/s
 static uint8_t pending[2];     // 每台电机挂着的 CMD_*
 static uint8_t dirty;          // 规划位置变了还没发出去
 static uint8_t move_pending;   // 有一次 Arm_MoveJoints 还没走完，走完 arm.moves 加 1
@@ -41,7 +50,7 @@ static uint32_t recover_ms;
 static uint8_t need_sync; // 1 = 规划等新的位置读数对齐，期间不下发位置
 static uint32_t sync_seq[2], sync_ms;
 static uint32_t used_seq[2];
-static float calib[4]; // 上一拍的零点和方向，变了就重新对齐
+static float calib[5]; // 上一拍的零点、方向、上电那一侧，变了就重新对齐
 static struct
 {
     uint32_t ms;
@@ -52,10 +61,33 @@ static arm_point points[ARM_POINTS];
 static unsigned point_count;
 static uint32_t seen_ms;
 
+/* 过死点。末端走的是两台电机连线的中垂线上的一段：离连线 from 的地方出发，朝 dir 走 length。 */
+enum
+{
+    SWING_OFF = 0,
+    SWING_APPROACH, // 关节空间走到助跑点
+    SWING_RUN,      // 末端沿直线穿过去
+};
+static struct
+{
+    uint8_t phase;
+    uint8_t crossed; // 已经过了死点、换过侧
+    uint8_t then;    // 过去以后接着走到 then_q
+    float then_q[2];
+    float gate[4];   // 连线中点、垂直于连线的单位向量（朝两个肘那一侧）
+    float from, dir; // 起点离连线多远，朝 gate 的方向走是 +1
+    float length;    // 这一段多长
+    float cross;     // 死点离起点多远
+    float s, v;      // 已经走了多远、现在的速度，mm、mm/s
+    float q_in[2], q_out[2];
+} swing;
+
 /* arm_calib.h 的点位表，最后一项是名字为空的结束标记。 */
-#define ARM_POINT(name, q1, q2) {#name, {q1, q2}},
-static const arm_point default_points[] = {ARM_POINT_TABLE{"", {0.0f, 0.0f}}};
+#define ARM_POINT(name, q1, q2, side) {#name, {q1, q2}, side},
+static const arm_point default_points[] = {ARM_POINT_TABLE{"", {0.0f, 0.0f}, 0U}};
 #undef ARM_POINT
+
+static uint8_t SwingStep(void);
 
 static float Dir(unsigned i)
 {
@@ -83,6 +115,49 @@ static uint8_t Problems(uint32_t now, uint8_t locked)
     return why;
 }
 
+/* 平滑一拍：把规划位置放进窗口，输出窗口的平均。direct = 1 时不平均（过死点的那条线）。
+   返回 1 = 输出还没追上规划位置。 */
+static uint8_t Smooth(uint8_t direct)
+{
+    long want = lroundf(arm_tune.smooth / (ARM_DT * 1000.0f));
+    unsigned n = 1U;
+    if (want > (long)ARM_SMOOTH_MAX)
+        n = ARM_SMOOTH_MAX;
+    else if (want > 1L)
+        n = (unsigned)want;
+    if (n != ring_n) // 窗口改了：从现在的输出接着走，不跳
+    {
+        ring_n = n;
+        ring_at = 0U;
+        for (unsigned i = 0; i < 2U; ++i)
+            for (unsigned k = 0; k < n; ++k)
+                ring[i][k] = out[i];
+    }
+    uint8_t busy = 0U;
+    for (unsigned i = 0; i < 2U; ++i)
+    {
+        float next = 0.0f;
+        ring[i][ring_at] = arm.sp[i];
+        for (unsigned k = 0; k < n; ++k)
+        {
+            if (direct)
+                ring[i][k] = arm.sp[i];
+            next += ring[i][k];
+        }
+        next /= (float)n;
+        if (direct || fabsf(next - arm.sp[i]) < 1e-3f) // 追上了：正好停在规划位置上
+            next = arm.sp[i];
+        else
+            busy = 1U;
+        out_vel[i] = (next - out[i]) / ARM_DT;
+        if (next != out[i])
+            dirty = 1U;
+        out[i] = next;
+    }
+    ring_at = (ring_at + 1U) % n;
+    return busy;
+}
+
 /* 规划从实测位置重新开始：速度清零，目标就是这里。 */
 static void Sync(void)
 {
@@ -90,8 +165,10 @@ static void Sync(void)
     {
         float q = JointAngle(i);
         base[i] = joint[i]->position_deg - Dir(i) * q;
-        arm.sp[i] = arm.goal[i] = q;
-        vel[i] = 0.0f;
+        arm.sp[i] = arm.goal[i] = out[i] = q;
+        vel[i] = out_vel[i] = 0.0f;
+        for (unsigned k = 0; k < ARM_SMOOTH_MAX; ++k)
+            ring[i][k] = q;
     }
     arm.moving = 0U;
     need_sync = 0U;
@@ -106,7 +183,8 @@ static void RequestSync(uint32_t settle_ms)
         sync_seq[i] = joint[i]->position_seq;
     sync_ms = HAL_GetTick() + settle_ms;
     need_sync = 1U;
-    arm.moving = 0U;
+    arm.moving = arm.swinging = 0U;
+    swing.phase = SWING_OFF;
     move_pending = 0U;
     vel[0] = vel[1] = 0.0f;
 }
@@ -140,13 +218,9 @@ static void Measure(void)
         ++history_count;
 }
 
-/* 零点、方向被 /set 或 /arm zero 改了：实测关节角马上按新的算，锁着的话规划重新对齐，臂不动。 */
-static void CheckCalibration(void)
+/* 把实测关节角、末端位置按现在的零点、方向、那一侧重新算一遍；锁着的话规划重新对齐，臂不动。 */
+static void Recalibrated(void)
 {
-    const float now[4] = {arm_tune.zero1, arm_tune.zero2, arm_tune.flip1, arm_tune.flip2};
-    if (memcmp(now, calib, sizeof(calib)) == 0)
-        return;
-    memcpy(calib, now, sizeof(calib));
     used_seq[0] = used_seq[1] = 0U;
     history_count = 0U; // 旧零点下的姿态不能拿来换算视觉
     Measure();
@@ -155,6 +229,20 @@ static void CheckCalibration(void)
         arm.follow = 0U;
         RequestSync(0U);
     }
+}
+
+/* 零点、方向被 /set 或 /arm zero 改了：马上按新的算。arm_mode（上电那一侧）改了，是在说臂现在
+   就在那一侧（标定时俯视图和实物对不上）。 */
+static void CheckCalibration(void)
+{
+    const float now[5] = {arm_tune.zero1, arm_tune.zero2, arm_tune.flip1, arm_tune.flip2,
+                          arm_tune.mode};
+    if (memcmp(now, calib, sizeof(calib)) == 0)
+        return;
+    if (now[4] != calib[4])
+        arm.side = now[4] >= 0.5f ? 1U : 0U;
+    memcpy(calib, now, sizeof(calib));
+    Recalibrated();
 }
 
 /* 拍照那一刻（t）臂的关节角：在历史里线性插值，比最早的还早就用最早的。 */
@@ -200,7 +288,8 @@ static void Fault(uint8_t why)
 {
     arm.state = ARM_FAULT;
     arm.detail = why;
-    arm.moving = 0U;
+    arm.moving = arm.swinging = 0U;
+    swing.phase = SWING_OFF;
     arm.follow = 0U;
     move_pending = 0U;
     recovering = 0U;
@@ -267,12 +356,14 @@ static void SendSetpoints(void)
     uint8_t sent = 1U;
     for (unsigned i = 0; i < 2U; ++i)
     {
-        long speed = lroundf(fabsf(vel[i]) / 6.0f * ARM_SPEED_MARGIN * 10.0f); // °/s → 0.1 RPM
-        if (speed < (long)ARM_MIN_RPM_X10)
-            speed = ARM_MIN_RPM_X10;
+        long speed = lroundf(fabsf(out_vel[i]) / 6.0f * ARM_SPEED_MARGIN * 10.0f); // °/s → 0.1 RPM
+        /* 过死点：死点前后规划速度过零，限速跟着压到底的话电机会晚到、张不到头。 */
+        long least = arm.swinging ? (long)ARM_SWING_RPM_X10 : (long)ARM_MIN_RPM_X10;
+        if (speed < least)
+            speed = least;
         if (speed > (long)ZDT_MAX_RPM_X10)
             speed = ZDT_MAX_RPM_X10;
-        long angle = lroundf((base[i] + Dir(i) * arm.sp[i]) * 10.0f);
+        long angle = lroundf((base[i] + Dir(i) * out[i]) * 10.0f);
         if (ZDT_Staged(joint[i]) != 0U ||
             ZDT_MovePosition(joint[i], (int32_t)angle, (uint16_t)speed, ZDT_POS_ABSOLUTE,
                              ZDT_SYNC_NOW) != HAL_OK)
@@ -384,15 +475,31 @@ void Arm_Tick(void)
             Want(0, CMD_STOP | CMD_DISABLE);
             Want(1, CMD_STOP | CMD_DISABLE);
             arm.state = ARM_FREE;
-            arm.moving = move_pending = 0U;
+            arm.moving = arm.swinging = move_pending = 0U;
+            swing.phase = SWING_OFF;
             break;
         }
         if (need_sync && SyncReady())
             Sync();
         if (!need_sync)
         {
-            uint8_t moving = PlanJoint(0);
-            moving |= PlanJoint(1);
+            uint8_t moving, running = swing.phase == SWING_RUN;
+            if (running)
+                moving = SwingStep();
+            else
+            {
+                moving = PlanJoint(0);
+                moving |= PlanJoint(1);
+            }
+            /* 发出去的位置追上规划才算走完；在助跑点停稳了再开始穿。 */
+            moving |= Smooth(running);
+            if (!moving && swing.phase == SWING_APPROACH)
+            {
+                swing.phase = SWING_RUN;
+                arm.goal[0] = swing.q_out[0];
+                arm.goal[1] = swing.q_out[1];
+                moving = 1U;
+            }
             if (!moving && move_pending)
             {
                 move_pending = 0U;
@@ -448,6 +555,9 @@ HAL_StatusTypeDef Arm_Init(void)
     memset(&arm, 0, sizeof(arm));
     arm.state = ARM_WAIT;
     arm.reach = 1U;
+    arm.side = arm_tune.mode >= 0.5f ? 1U : 0U;
+    swing.phase = SWING_OFF;
+    ring_n = ring_at = 0U;
     cycle = 0U;
     dirty = move_pending = want_free = recovering = need_sync = 0U;
     used_seq[0] = used_seq[1] = 0U;
@@ -456,10 +566,11 @@ HAL_StatusTypeDef Arm_Init(void)
     calib[1] = arm_tune.zero2;
     calib[2] = arm_tune.flip1;
     calib[3] = arm_tune.flip2;
+    calib[4] = arm_tune.mode;
     pending[0] = pending[1] = CMD_ENABLE;
     point_count = 0U;
     for (const arm_point *p = default_points; p->name[0]; ++p)
-        (void)Arm_SetPoint(p->name, p->q[0], p->q[1]);
+        (void)Arm_SetPoint(p->name, p->q[0], p->q[1], p->side);
     return HAL_OK;
 }
 
@@ -477,8 +588,8 @@ void Arm_Elbows(float q1, float q2, float elbow[4])
     elbow[3] = arm_tune.j2_y + arm_tune.a2 * sinf(q2 * MATH_DEG_TO_RAD);
 }
 
-/* 正解：两根小臂从两个肘出发交在末端，两圆的两个交点按 arm_mode 选一个。 */
-uint8_t Arm_Forward(float q1, float q2, float *x, float *y)
+/* 正解：两根小臂从两个肘出发交在末端，两圆的两个交点按末端在哪一侧选一个。 */
+static uint8_t Forward(uint8_t side, float q1, float q2, float *x, float *y)
 {
     float e[4], b1 = arm_tune.b1, b2 = arm_tune.b2;
     Arm_Elbows(q1, q2, e);
@@ -486,10 +597,15 @@ uint8_t Arm_Forward(float q1, float q2, float *x, float *y)
     if (!(d > fabsf(b1 - b2) && d < b1 + b2 && d > 1e-3f)) // 写成这样 NAN 也合不拢
         return 0U;
     float along = (b1 * b1 - b2 * b2 + d * d) / (2.0f * d);
-    float h = sqrtf(fmaxf(b1 * b1 - along * along, 0.0f)) * (arm_tune.mode >= 0.5f ? -1.0f : 1.0f);
+    float h = sqrtf(fmaxf(b1 * b1 - along * along, 0.0f)) * (side ? -1.0f : 1.0f);
     *x = e[0] + (along * dx - h * dy) / d;
     *y = e[1] + (along * dy + h * dx) / d;
     return 1U;
+}
+
+uint8_t Arm_Forward(float q1, float q2, float *x, float *y)
+{
+    return Forward(arm.side, q1, q2, x, y);
 }
 
 /* 两个向量的夹角离 0° 或 180° 还有多少度。 */
@@ -499,9 +615,9 @@ static float Corner(float ax, float ay, float bx, float by)
     return fminf(angle, 180.0f - angle);
 }
 
-/* 死点是两根小臂在末端成一条线：这时两台电机管不住末端，机构会翻到另一种装配方式，两台电机还会
-   互相顶。一边的大小臂拉直或折叠不算：那只是这根臂够得着的边，关节直着转过去肘换一边就行，
-   两个工作区之间就是这么摆过去的。 */
+/* 死点是两根小臂在末端成一条线：这时两台电机管不住末端。一边的大小臂拉直或折叠不算：那只是
+   这根臂够得着的边，关节直着转过去肘换一边就行。离死点多远两侧是一样的（两侧的末端关于两个肘的
+   连线对称），所以这里和查路径都不分侧。 */
 float Arm_Clearance(float q1, float q2)
 {
     float e[4], x, y;
@@ -511,29 +627,35 @@ float Arm_Clearance(float q1, float q2)
     return Corner(e[0] - x, e[1] - y, e[2] - x, e[3] - y);
 }
 
-/* 逆解：每根大臂两支，四种组合里合得拢到 (x, y)（装配方式对）、离死点至少 arm_margin 的，最多 4
- * 个。 */
-static unsigned Candidates(float x, float y, float out[4][2])
+/* 一根大臂（i = 0 是 J1）的逆解：末端在 (x, y) 时它能摆的两个角度，肘在两边各一个；
+   够不着返回 0。 */
+static uint8_t LegAngles(unsigned i, float x, float y, float branch[2])
 {
-    const float jx[2] = {arm_tune.j1_x, arm_tune.j2_x}, jy[2] = {arm_tune.j1_y, arm_tune.j2_y};
-    const float a[2] = {arm_tune.a1, arm_tune.a2}, b[2] = {arm_tune.b1, arm_tune.b2};
+    float a = i ? arm_tune.a2 : arm_tune.a1, b = i ? arm_tune.b2 : arm_tune.b1;
+    float dx = x - (i ? arm_tune.j2_x : arm_tune.j1_x),
+          dy = y - (i ? arm_tune.j2_y : arm_tune.j1_y);
+    float r = hypotf(dx, dy), c = (a * a + r * r - b * b) / (2.0f * a * r);
+    if (!(r > 1e-3f && c >= -1.0f && c <= 1.0f))
+        return 0U;
+    float toward = atan2f(dy, dx), spread = acosf(c);
+    branch[0] = Math_WrapDeg((toward + spread) * MATH_RAD_TO_DEG);
+    branch[1] = Math_WrapDeg((toward - spread) * MATH_RAD_TO_DEG);
+    return 1U;
+}
+
+/* 逆解：每根大臂两支，四种组合里末端在 side 那一侧时合得拢到 (x, y)、离死点至少 arm_margin 的，
+   最多 4 个。 */
+static unsigned Candidates(uint8_t side, float x, float y, float out[4][2])
+{
     float branch[2][2];
-    for (unsigned i = 0; i < 2U; ++i)
-    {
-        float dx = x - jx[i], dy = y - jy[i], r = hypotf(dx, dy);
-        float c = (a[i] * a[i] + r * r - b[i] * b[i]) / (2.0f * a[i] * r);
-        if (!(r > 1e-3f && c >= -1.0f && c <= 1.0f))
-            return 0U;
-        float toward = atan2f(dy, dx), spread = acosf(c);
-        branch[i][0] = Math_WrapDeg((toward + spread) * MATH_RAD_TO_DEG);
-        branch[i][1] = Math_WrapDeg((toward - spread) * MATH_RAD_TO_DEG);
-    }
+    if (!LegAngles(0U, x, y, branch[0]) || !LegAngles(1U, x, y, branch[1]))
+        return 0U;
     unsigned n = 0U;
     for (unsigned k = 0; k < 4U; ++k)
     {
         float q1 = branch[0][k >> 1], q2 = branch[1][k & 1U], px, py;
-        // 另一种装配方式的姿态正解回去是另一个交点，不是 (x, y)
-        if (Arm_Clearance(q1, q2) < arm_tune.margin || !Arm_Forward(q1, q2, &px, &py) ||
+        // 末端在另一侧的姿态正解回去是另一个交点，不是 (x, y)
+        if (Arm_Clearance(q1, q2) < arm_tune.margin || !Forward(side, q1, q2, &px, &py) ||
             hypotf(px - x, py - y) > ARM_SAME_MM)
             continue;
         out[n][0] = q1;
@@ -551,7 +673,7 @@ static float Distance(const float a[2], const float b[2])
 uint8_t Arm_Inverse(float x, float y, const float near[2], float q[2])
 {
     float cand[4][2];
-    unsigned n = Candidates(x, y, cand), best = 0U;
+    unsigned n = Candidates(arm.side, x, y, cand), best = 0U;
     for (unsigned k = 1; k < n; ++k)
         if (Distance(cand[k], near) < Distance(cand[best], near))
             best = k;
@@ -593,7 +715,7 @@ static arm_result Check(const float q[2])
 
 arm_result Arm_MoveJoints(float q1, float q2)
 {
-    if (joint[0] == NULL || arm.state != ARM_READY || need_sync)
+    if (joint[0] == NULL || arm.state != ARM_READY || need_sync || swing.phase != SWING_OFF)
         return ARM_BUSY;
     const float q[2] = {q1, q2};
     arm_result result = Check(q);
@@ -610,7 +732,7 @@ arm_result Arm_MoveJoints(float q1, float q2)
 static arm_result Solve(float x, float y, float q[2])
 {
     float cand[4][2];
-    unsigned n = Candidates(x, y, cand);
+    unsigned n = Candidates(arm.side, x, y, cand);
     uint8_t found = 0U;
     for (unsigned k = 0; k < n; ++k)
         if (PathClear(arm.sp, cand[k]) &&
@@ -625,11 +747,279 @@ static arm_result Solve(float x, float y, float q[2])
 
 arm_result Arm_MoveTo(float x, float y)
 {
-    float q[2];
-    if (joint[0] == NULL || arm.state != ARM_READY || need_sync)
+    float q[2], other[4][2];
+    if (joint[0] == NULL || arm.state != ARM_READY || need_sync || swing.phase != SWING_OFF)
         return ARM_BUSY;
     arm_result result = Solve(x, y, q);
+    if (result == ARM_REACH && Candidates(arm.side ^ 1U, x, y, other))
+        return ARM_SIDE;
     return result == ARM_OK ? Arm_MoveJoints(q[0], q[1]) : result;
+}
+
+/* 过死点的那条线上的一点：末端在两台电机连线的中垂线上、离连线 t（朝 gate[2..3] 为正），两根大臂
+   各取肘更靠那个方向的一支；够不着返回 0，限位不在这里查。side_d = 末端离两个肘的连线多远，
+   mm，符号是在连线的哪一边（正 = 左，就是 arm.side 0）；dot < 0 表示末端夹在两个肘中间。 */
+static uint8_t SwingPose(const float gate[4], float t, float q[2], float *side_d, float *dot)
+{
+    float x = gate[0] + t * gate[2], y = gate[1] + t * gate[3], e[4];
+    for (unsigned i = 0; i < 2U; ++i)
+    {
+        float branch[2], lean[2];
+        if (!LegAngles(i, x, y, branch))
+            return 0U;
+        for (unsigned k = 0; k < 2U; ++k)
+            lean[k] = cosf(branch[k] * MATH_DEG_TO_RAD) * gate[2] +
+                      sinf(branch[k] * MATH_DEG_TO_RAD) * gate[3];
+        q[i] = branch[lean[1] > lean[0] ? 1U : 0U];
+    }
+    Arm_Elbows(q[0], q[1], e);
+    float ex = e[2] - e[0], ey = e[3] - e[1], apart = hypotf(ex, ey);
+    *side_d = apart > 1e-3f ? (ex * (y - e[1]) - ey * (x - e[0])) / apart : 0.0f;
+    *dot = (e[0] - x) * (e[2] - x) + (e[1] - y) * (e[3] - y);
+    return 1U;
+}
+
+/* 过死点那条线的一头：从死点（离连线 cross）朝 toward 找末端离两个肘的连线 run 的地方。 */
+static uint8_t SwingEnd(const float gate[4], float cross, float toward, float run, float *end)
+{
+    float q[2], d, dot, near = cross;
+    for (float far = cross + toward * ARM_SWING_STEP_MM;
+         fabsf(far - cross) <= 2.0f * ARM_SWING_SCAN_MM; far += toward * ARM_SWING_STEP_MM)
+    {
+        if (!SwingPose(gate, far, q, &d, &dot))
+            return 0U;
+        if (fabsf(d) < run)
+        {
+            near = far;
+            continue;
+        }
+        for (unsigned k = 0; k < 12U; ++k)
+        {
+            float mid = 0.5f * (near + far);
+            if (!SwingPose(gate, mid, q, &d, &dot))
+                return 0U;
+            if (fabsf(d) < run)
+                near = mid;
+            else
+                far = mid;
+        }
+        *end = far;
+        return 1U;
+    }
+    return 0U;
+}
+
+/* 找过死点的线：两个肘现在在两台电机连线的哪一侧，就在那一侧的中垂线上找死点（末端夹在两个肘
+   中间、换边的地方），从末端现在那一侧走向另一侧。两头都取末端离两个肘的连线 arm_swing_run 的
+   地方：两头的关节角一样，末端关于连线对称，小臂和连线的夹角一样大，电机带末端的劲也一样。
+   （按离死点的距离取两头是不对称的：连线自己在动，外侧那一头小臂几乎还是一条线，电机带不动
+   末端，实物上甩得过去、甩不回来。）整条线都要合得拢、在限位里、关节角连续。 */
+static arm_result SwingPlan(void)
+{
+    float e[4], q[2], d = 0.0f, dot = 0.0f;
+    float bx = arm_tune.j2_x - arm_tune.j1_x, by = arm_tune.j2_y - arm_tune.j1_y;
+    float base = hypotf(bx, by);
+    if (!(base > 1e-3f))
+        return ARM_REACH;
+    float *gate = swing.gate;
+    gate[0] = 0.5f * (arm_tune.j1_x + arm_tune.j2_x);
+    gate[1] = 0.5f * (arm_tune.j1_y + arm_tune.j2_y);
+    gate[2] = -by / base;
+    gate[3] = bx / base;
+    Arm_Elbows(arm.sp[0], arm.sp[1], e);
+    if ((0.5f * (e[0] + e[2]) - gate[0]) * gate[2] + (0.5f * (e[1] + e[3]) - gate[1]) * gate[3] <
+        0.0f)
+    {
+        gate[2] = -gate[2];
+        gate[3] = -gate[3];
+    }
+    /* 沿线找末端换边、又夹在两个肘中间的地方，再二分。两个肘叠在一起也会换边，那不是要过的
+       死点。 */
+    float lo = 0.0f, hi = 0.0f, lo_d = 0.0f;
+    uint8_t have = 0U, found = 0U;
+    for (float t = -ARM_SWING_SCAN_MM; t <= ARM_SWING_SCAN_MM; t += ARM_SWING_STEP_MM)
+    {
+        if (!SwingPose(gate, t, q, &d, &dot))
+        {
+            have = 0U;
+            continue;
+        }
+        if (have && (lo_d < 0.0f) != (d < 0.0f) && dot < 0.0f)
+        {
+            hi = t;
+            found = 1U;
+            break;
+        }
+        lo = t;
+        lo_d = d;
+        have = 1U;
+    }
+    if (!found)
+        return ARM_REACH;
+    for (unsigned k = 0; k < 20U; ++k)
+    {
+        float mid = 0.5f * (lo + hi);
+        if (!SwingPose(gate, mid, q, &d, &dot))
+            return ARM_REACH;
+        if ((d < 0.0f) == (lo_d < 0.0f))
+            lo = mid;
+        else
+            hi = mid;
+    }
+    /* lo 那一头末端在 lo_d 的那一边（负 = side 1）：从现在这一侧出发。 */
+    float cross = 0.5f * (lo + hi), end = 0.0f, last[2] = {0.0f, 0.0f};
+    swing.dir = ((lo_d < 0.0f) == (arm.side != 0U)) ? 1.0f : -1.0f;
+    if (!SwingEnd(gate, cross, -swing.dir, arm_tune.swing_run, &swing.from) ||
+        !SwingEnd(gate, cross, swing.dir, arm_tune.swing_run, &end))
+        return ARM_REACH;
+    swing.length = fabsf(end - swing.from);
+    swing.cross = fabsf(cross - swing.from);
+    unsigned steps = (unsigned)ceilf(swing.length / ARM_SWING_STEP_MM);
+    for (unsigned k = 0; k <= steps; ++k)
+    {
+        float t = swing.from + swing.dir * swing.length * (float)k / (float)steps;
+        if (!SwingPose(gate, t, q, &d, &dot))
+            return ARM_REACH;
+        if (!Arm_InLimits(q[0], q[1]))
+            return ARM_LIMIT;
+        if (k == 0U)
+        {
+            swing.q_in[0] = q[0];
+            swing.q_in[1] = q[1];
+        }
+        else if (fabsf(Math_WrapDeg(q[0] - last[0])) > ARM_SWING_JUMP_DEG ||
+                 fabsf(Math_WrapDeg(q[1] - last[1])) > ARM_SWING_JUMP_DEG)
+            return ARM_REACH;
+        last[0] = q[0];
+        last[1] = q[1];
+    }
+    swing.q_out[0] = q[0];
+    swing.q_out[1] = q[1];
+    return ARM_OK;
+}
+
+/* 过死点走一拍：末端沿那条线走梯形速度，助跑那一段走一半就加到 arm_swing_speed，匀速穿过死点，
+   过了以后在后一半距离里收住（两段不一样长，加、减速度分开算）；关节角按逆解跟着（死点附近电机
+   几乎不动，速度过零再反向）。走过死点那一拍换侧。返回 1 = 还在走。 */
+static uint8_t SwingStep(void)
+{
+    float top = arm_tune.swing_speed, up = top * top / fmaxf(swing.cross, 1.0f);
+    float down = top * top / fmaxf(swing.length - swing.cross, 1.0f);
+    float left = fmaxf(swing.length - swing.s, 0.0f);
+    float v = fminf(fminf(swing.v + up * ARM_DT, top), sqrtf(2.0f * down * left));
+    v = fmaxf(v, fminf(up, down) * ARM_DT);
+    swing.v = v;
+    swing.s += v * ARM_DT;
+    uint8_t done = swing.s >= swing.length;
+    if (done)
+        swing.s = swing.length;
+    float q[2], d, dot;
+    dirty = 1U;
+    if (!SwingPose(swing.gate, swing.from + swing.dir * swing.s, q, &d, &dot))
+        done = 1U; // 整条线规划时查过，走不到这里；真到了就停在这一拍的位置
+    else
+        for (unsigned i = 0; i < 2U; ++i)
+        {
+            float step = Math_WrapDeg(q[i] - arm.sp[i]);
+            vel[i] = step / ARM_DT;
+            arm.sp[i] += step;
+        }
+    if (!swing.crossed && swing.s >= swing.cross)
+    {
+        swing.crossed = 1U;
+        arm.side ^= 1U;
+    }
+    if (!done)
+        return 1U;
+    swing.phase = SWING_OFF;
+    arm.swinging = 0U;
+    vel[0] = vel[1] = 0.0f;
+    arm.goal[0] = arm.sp[0];
+    arm.goal[1] = arm.sp[1];
+    if (!swing.then || !swing.crossed)
+        return 0U;
+    SetGoal(swing.then_q, 1U);
+    return 1U;
+}
+
+/* then != NULL：过去以后接着走到这组关节角（末端在另一侧），从出口过去的路也先查好。 */
+static arm_result SwingStart(const float *then)
+{
+    if (joint[0] == NULL || arm.state != ARM_READY || need_sync || arm.moving)
+        return ARM_BUSY;
+    arm_result result = SwingPlan();
+    if (result != ARM_OK)
+        return result;
+    uint8_t there = Distance(arm.sp, swing.q_in) < 0.05f;
+    if (!there && (result = Check(swing.q_in)) != ARM_OK)
+        return result;
+    if (then != NULL)
+    {
+        if (!Arm_InLimits(then[0], then[1]))
+            return ARM_LIMIT;
+        if (Arm_Clearance(then[0], then[1]) <= 0.0f)
+            return ARM_REACH;
+        if (!PathClear(swing.q_out, then))
+            return ARM_PATH;
+        swing.then_q[0] = then[0];
+        swing.then_q[1] = then[1];
+    }
+    swing.then = then != NULL;
+    swing.s = swing.v = 0.0f;
+    swing.crossed = 0U;
+    arm.follow = 0U;
+    if (there)
+    {
+        swing.phase = SWING_RUN;
+        arm.goal[0] = swing.q_out[0];
+        arm.goal[1] = swing.q_out[1];
+    }
+    else
+    {
+        SetGoal(swing.q_in, 1U);
+        swing.phase = SWING_APPROACH;
+    }
+    arm.moving = arm.swinging = 1U;
+    move_pending = 1U;
+    return ARM_OK;
+}
+
+arm_result Arm_Swing(void)
+{
+    return SwingStart(NULL);
+}
+
+arm_result Arm_MoveJointsSide(float q1, float q2, uint8_t side)
+{
+    const float q[2] = {q1, q2};
+    if ((side ? 1U : 0U) == arm.side)
+        return Arm_MoveJoints(q1, q2);
+    return SwingStart(q);
+}
+
+HAL_StatusTypeDef Arm_SetSide(uint8_t side)
+{
+    if (joint[0] == NULL || (arm.state != ARM_READY && arm.state != ARM_FREE) || arm.moving ||
+        need_sync)
+        return HAL_BUSY;
+    arm.side = side ? 1U : 0U;
+    Recalibrated();
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef Arm_DeadPoint(float b[2])
+{
+    if (joint[0] == NULL || (arm.state != ARM_READY && arm.state != ARM_FREE) || arm.moving ||
+        need_sync)
+        return HAL_BUSY;
+    float e[4];
+    Arm_Elbows(arm.q[0], arm.q[1], e);
+    float apart = hypotf(e[2] - e[0], e[3] - e[1]), sum = arm_tune.b1 + arm_tune.b2;
+    if (!(apart > 0.9f * sum && apart < 1.1f * sum))
+        return HAL_ERROR;
+    b[0] = arm_tune.b1 * apart / sum;
+    b[1] = arm_tune.b2 * apart / sum;
+    return HAL_OK;
 }
 
 void Arm_Stop(void)
@@ -769,7 +1159,7 @@ HAL_StatusTypeDef Arm_Follow(uint8_t color)
 {
     if (joint[0] == NULL || color > COLOR_LIGHT_BLUE)
         return HAL_ERROR;
-    if (color && arm.state != ARM_READY)
+    if (color && (arm.state != ARM_READY || swing.phase != SWING_OFF))
         return HAL_BUSY;
     arm.follow = color;
     arm.seen = 0U;
@@ -838,7 +1228,7 @@ const arm_point *Arm_FindPoint(const char *name)
     return NULL;
 }
 
-HAL_StatusTypeDef Arm_SetPoint(const char *name, float q1, float q2)
+HAL_StatusTypeDef Arm_SetPoint(const char *name, float q1, float q2, uint8_t side)
 {
     if (!Arm_ValidName(name) || !Arm_InLimits(q1, q2))
         return HAL_ERROR;
@@ -852,6 +1242,7 @@ HAL_StatusTypeDef Arm_SetPoint(const char *name, float q1, float q2)
     }
     p->q[0] = q1;
     p->q[1] = q2;
+    p->side = side ? 1U : 0U;
     return HAL_OK;
 }
 

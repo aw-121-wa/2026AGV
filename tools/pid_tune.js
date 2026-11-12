@@ -118,7 +118,7 @@
       tmax: p.turn_max_speed, acc: p.acc_angular, tol: p.heading_tol, accLin: p.acc_linear,
       chassisK: p.chassis_k, wheelDia: p.wheel_dia,
       ext: p.heading_brake !== undefined, brake: p.heading_brake || 0, ffx: p.heading_ff_x || 0, ffy: p.heading_ff_y || 0,
-      wheelMax: p.max_wheel_rpm || 400,
+      wheelMax: p.max_wheel_rpm || 400, latScale: p.lateral_scale || 1, latSkew: p.lateral_skew || 0,
     };
   }
 
@@ -178,14 +178,14 @@
   /* ---------- 3. 仿真（固件航向环 + 车的模型） ---------- */
   /* 车体速度 → 四轮 0.1 RPM（整体等比限幅、取整）→ 再换回车体速度，和 Chassis_Solve 一样。 */
   function makeSolver(g) {
-    const perMm = 600 / (Math.PI * g.wheelDia), limit = (g.wheelMax || 400) * 10;
+    const perMm = 600 / (Math.PI * g.wheelDia), limit = (g.wheelMax || 400) * 10, lat = g.latScale || 1, skew = g.latSkew || 0;
     const raw = new Float64Array(4);
     const out = { vx: 0, vy: 0, wz: 0 };
     return (vx, vy, wz) => {
       const wmm = g.chassisK * wz * Math.PI / 180;
       let peak = 0;
       for (let i = 0; i < 4; ++i) {
-        raw[i] = (vx + SIGN_VY[i] * vy + SIGN_WZ[i] * wmm) * perMm;
+        raw[i] = (vx - skew * vy + SIGN_VY[i] * vy / lat + SIGN_WZ[i] * wmm) * perMm;
         peak = Math.max(peak, Math.abs(raw[i]));
       }
       const scale = peak > limit ? limit / peak : 1;
@@ -194,7 +194,7 @@
         const q = roundAway(raw[i] * scale) / perMm;
         sx += q; sy += SIGN_VY[i] * q; sw += SIGN_WZ[i] * q;
       }
-      out.vx = sx / 4; out.vy = sy / 4; out.wz = sw / 4 / g.chassisK * 180 / Math.PI;
+      out.vy = sy / 4 * lat; out.vx = sx / 4 + skew * out.vy; out.wz = sw / 4 / g.chassisK * 180 / Math.PI;
       return out;
     };
   }
