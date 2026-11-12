@@ -1,3 +1,5 @@
 build
 mx.scratch
 !.settings
+*.su
+__pycache__/

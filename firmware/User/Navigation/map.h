@@ -1,0 +1,83 @@
+#ifndef MAP_H
+#define MAP_H
+
+#include <stdint.h>
+#define MAP_WIDTH_MM  2400
+#define MAP_HEIGHT_MM 2400
+#define MAP_CELL_MM   10
+
+#define MAP_COLS  (MAP_WIDTH_MM / MAP_CELL_MM)
+#define MAP_ROWS  (MAP_HEIGHT_MM / MAP_CELL_MM)
+#define MAP_CELLS (MAP_COLS * MAP_ROWS)
+
+#define ROBOT_LENGTH_MM 270
+#define ROBOT_WIDTH_MM  270
+#define MAP_MARGIN_MM   10
+
+#define ROBOT_HALF_COLS                                                                            \
+    (((ROBOT_LENGTH_MM + 1) / 2 + MAP_MARGIN_MM + MAP_CELL_MM - 1) / MAP_CELL_MM)
+#define ROBOT_HALF_ROWS (((ROBOT_WIDTH_MM + 1) / 2 + MAP_MARGIN_MM + MAP_CELL_MM - 1) / MAP_CELL_MM)
+
+/* Nominal symmetric placement: calibrate against actual field. */
+#define MAP_ISLAND_LOW  550
+#define MAP_ISLAND_HIGH 1400
+#define MAP_ISLAND_SIZE 450
+
+#define MAP_STATION_BEGIN 910
+#define MAP_STATION_END   1490
+#define MAP_STATION_DEPTH 150
+
+/* Conservative reservation for raw table intrusion (75-85 mm). */
+#define MAP_TOP_RESERVE_MM 85
+/* 转盘 Ø300，圆心 x 在 1100~1300 之间随机：场地边上它可能占到的 x 范围。 */
+#define MAP_TABLE_X_MIN 964
+#define MAP_TABLE_X_MAX 1436
+
+#define MAP_MAX_OBSTACLES 16
+
+typedef struct
+{
+    uint16_t row, col;
+} MapCell;
+
+typedef struct
+{
+    int32_t x, y;
+} MapPoint;
+
+/* 清空动态障碍并构建原始栅格地图。 */
+void Map_Init(void);
+
+/* 查询原始栅格是否空闲，不包含车身包络。 */
+uint8_t Map_IsFree(uint16_t row, uint16_t col);
+
+/* 判断栅格中心能否容纳车身和默认余量（查预计算的构型空间位图）；设了附加圆时它也要放得下。 */
+uint8_t Map_CanStand(uint16_t row, uint16_t col);
+
+/* 车身外多出来的一块圆（比如伸出去扫描的雷达）：圆心相对车体中心的场地偏移 (dx, dy)，半径 radius
+   已含余量；radius 为 0 去掉。设了以后 Map_CanStand 和用它的 A* 都要这块圆也放得下：在场内、不压
+   障碍物和禁区。加上或改了就递增地图版本，正在走的路线会重新检查；去掉不递增。Map_Init 会去掉它。 */
+void Map_SetAttachment(float dx, float dy, float radius);
+
+/* 将场地毫米坐标换算为行列号。 */
+uint8_t Map_WorldToGrid(int32_t x, int32_t y, uint16_t *row, uint16_t *col);
+
+/* 返回栅格中心的场地毫米坐标。 */
+uint8_t Map_GridToWorld(uint16_t row, uint16_t col, MapPoint *p);
+
+/* 检查带朝向车身的保守外接矩形。 */
+uint8_t Map_CanPoseHeading(float x, float y, float heading_deg, float margin);
+
+/* 检查轴向移动段的完整车身扫掠区域。 */
+uint8_t Map_CanSegment(MapPoint a, MapPoint b, float margin);
+
+/* 添加圆形障碍并递增地图版本。 */
+uint8_t Map_AddObstacle(int32_t x, int32_t y, uint16_t radius);
+
+/* 读取当前地图版本，用于使旧路径失效。 */
+uint32_t Map_Revision(void);
+
+/* 获取指定出发区中心。 */
+uint8_t Map_StartPoint(uint8_t zone, MapPoint *p);
+
+#endif
